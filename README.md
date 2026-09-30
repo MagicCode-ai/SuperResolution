@@ -24,7 +24,6 @@ Test platform: A16Pro CPU. Metric: processing time in ms.
 | --- | ---: |
 | Bilinear | 2.38 |
 | MagicSR Spatial Speed | 3.12 |
-| MagicSR Spatial Balanced | 8.51 |
 | MetalFX-Spatial | 8.82 |
 
 #### Android Vulkan Super-Resolution Speed Comparison
@@ -36,7 +35,6 @@ Test platform: Qualcomm Snapdragon 888 CPU. Metric: processing time in ms.
 | Bilinear | 2.918 |
 | MagicSR Spatial Speed | 3.93 |
 | SGSR1.0 | 4.678 |
-| MagicSR Spatial Balanced | 17.82 |
 
 ### MagicSR Balanced vs Apple MetalFx
 
