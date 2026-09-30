@@ -137,7 +137,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\nMODEL_SRC_DIR=\"${SRCROOT}/../../model\"\nMODEL_DST_DIR=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\nif [ ! -d \"$MODEL_SRC_DIR\" ]; then\n  echo \"error: model directory missing: $MODEL_SRC_DIR\"\n  exit 1\nfi\nmkdir -p \"$MODEL_DST_DIR\"\ncp \"$MODEL_SRC_DIR\"/*.bin \"$MODEL_DST_DIR\"/\n";
+			shellScript = "set -e\nMODEL_SRC_DIR=\"${SRCROOT}/../model\"\nMODEL_DST_DIR=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\nif [ ! -d \"$MODEL_SRC_DIR\" ]; then\n  echo \"error: model directory missing: $MODEL_SRC_DIR\"\n  exit 1\nfi\nmkdir -p \"$MODEL_DST_DIR\"\ncp \"$MODEL_SRC_DIR\"/*.bin \"$MODEL_DST_DIR\"/\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -174,27 +174,23 @@
 				CLANG_ENABLE_OBJC_ARC = YES;
 				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/MagicCameraSR",
-					"$(SRCROOT)/../../interface",
-				);
-				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
-				ARCHS = arm64;
-				EXCLUDED_ARCHS = "i386 x86_64 armv7";
-				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../../lib/ios";
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/../../../interface";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
+				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../../../lib/ios";
 				OTHER_LDFLAGS = (
 					"-lmagic_sr",
-					"-lc++",
 					"-framework",
 					AVFoundation,
 					"-framework",
 					CoreVideo,
 					"-framework",
-					ImageIO,
+					Foundation,
 					"-framework",
 					Metal,
 					"-framework",
 					MetalFX,
+					"-framework",
+					MetalKit,
 					"-framework",
 					MetalPerformanceShaders,
 					"-framework",
@@ -215,27 +211,23 @@
 				CLANG_ENABLE_OBJC_ARC = YES;
 				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/MagicCameraSR",
-					"$(SRCROOT)/../../interface",
-				);
-				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
-				ARCHS = arm64;
-				EXCLUDED_ARCHS = "i386 x86_64 armv7";
-				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../../lib/ios";
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/../../../interface";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
+				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../../../lib/ios";
 				OTHER_LDFLAGS = (
 					"-lmagic_sr",
-					"-lc++",
 					"-framework",
 					AVFoundation,
 					"-framework",
 					CoreVideo,
 					"-framework",
-					ImageIO,
+					Foundation,
 					"-framework",
 					Metal,
 					"-framework",
 					MetalFX,
+					"-framework",
+					MetalKit,
 					"-framework",
 					MetalPerformanceShaders,
 					"-framework",

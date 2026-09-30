@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId "com.example.magiccamera"
-        minSdk 28
+        minSdk 26
         targetSdk 34
         versionCode 1
         versionName "1.0"
@@ -17,7 +17,7 @@ android {
 
         externalNativeBuild {
             cmake {
-                arguments "-DANDROID_STL=c++_shared", "-DANDROID_PLATFORM=android-28"
+                arguments "-DANDROID_STL=c++_shared"
             }
         }
         ndk {
@@ -28,8 +28,6 @@ android {
     buildTypes {
         release {
             minifyEnabled false
-            // Demo compile verification only; not a store keystore.
-            signingConfig signingConfigs.debug
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
@@ -46,15 +44,6 @@ android {
         }
     }
 }
-
-def repoModelDir = file("${projectDir}/../../../model")
-def assetModelDir = file("${projectDir}/src/main/assets/model")
-tasks.register('copyRepoGpuModel', Copy) {
-    from repoModelDir
-    include 'magic_sr_gpu_params.bin'
-    into assetModelDir
-}
-preBuild.dependsOn copyRepoGpuModel
 
 configurations.configureEach {
     resolutionStrategy {

@@ -1,362 +1,297 @@
 # MagicCode Super-Resolution (MagicSR) User Guide
 
-Version: v2.1.0
-Applies to: Native SDK (C API)
-Platforms: Android (Vulkan / OpenGLES), iOS / macOS (Metal), Windows (Vulkan / Direct3D 11 / OpenGL 4.3), macOS (Apple Silicon / x86_64)
+Version: v2.2.0 (`mc_nscaler_version()`)
+Applies to: Native SDK
+Platforms: Android (Vulkan / OpenGLES), iOS / macOS (Metal), Windows (Vulkan / Direct3D 11 / OpenGL 4.3), CPU (x86 / NEON, spatial)
 
 中文版：[`用户使用说明书.md`](用户使用说明书.md)
+
+Header: `interface/mc_interface.h`
 
 ---
 
 ## 1. Product Overview
 
-MagicSR is the MagicCode super-resolution SDK. It upscales input images or GPU textures and enhances visual detail. Typical use cases include mobile camera preview/processing, game rendering, and UI scaling.
+MagicSR upscales a caller-owned image and writes the result into a caller-owned output. Spatial modes take one color image per frame. Temporal modes also take depth, motion vectors, jitter, and camera parameters.
 
-Starting in **v2.1.0**, MagicSR unifies all features into a single library per platform and a streamlined 3-function public C ABI:
+There is one public API:
 
-```c
-int MC_Enable(void **handle, magic_frame_t *frame, input_param_t *param, output_status_params_t *status_info);
-int MC_Disable(void *handle);
-char *MC_GetVersion(void);
-```
+| Call | Role |
+|------|------|
+| `mc_nscaler_control(..., MC_NSCALER_CMD_SET_PARAM, &ctrl, NULL)` | Create the handle from `ctrl_param_t` when `*handle` is NULL. Later calls update mutable settings. |
+| `mc_nscaler_enable(&handle, &in_frame, &out_frame)` | Process one frame. |
+| `mc_nscaler_control(..., MC_NSCALER_CMD_QUERY_STATUS, NULL, &status)` | Read sizes, mode, `gpu_time`, and `error_code`. |
+| `mc_nscaler_disable(handle)` | Release the handle. |
+| `mc_nscaler_version()` | Static version string, currently `v2.2.0`. |
 
-### Key Advantages of v2.1.0
-
-- **Single Deliverable per Platform**: Only one static library (`libmagic_sr.a` / `libmagic_sr.lib`) and one header (`interface/mc_interface.h`). No auxiliary enable wrapper libraries or separate headers needed.
-- **Unified Public API**: All operations—initialization, per-frame execution, dynamic reconfiguration, and status querying—are performed via `MC_Enable`. Resource cleanup is handled by `MC_Disable`.
-- **Spatial & Temporal Support**: Both single-frame spatial super-resolution and multi-frame temporal super-resolution share the same `MC_Enable` function signature.
+Zero-initialize every struct, then set the fields you use. The caller owns every GPU texture and CPU buffer. The library does not allocate the output image and does not free the caller's resources.
 
 ---
 
-## 2. Deliverables and Requirements
+## 2. Libraries
 
-### 2.1 Static Libraries and Headers
+Link **one** of the static archive or the dynamic library for the target. Both export the same `mc_nscaler_*` symbols. Include `interface/mc_interface.h`.
 
-| Platform | Static Library | Public Header |
-|----------|----------------|---------------|
-| Android | `lib/android/libmagic_sr.a` | `interface/mc_interface.h` |
-| iOS | `lib/ios/libmagic_sr.a` | `interface/mc_interface.h` |
-| macOS (Apple Silicon) | `lib/mac_arm/libmagic_sr.a` | `interface/mc_interface.h` |
-| macOS (x86_64) | `lib/mac_x86/libmagic_sr.a` | `interface/mc_interface.h` |
-| Windows | `lib/windows/libmagic_sr.lib` | `interface/mc_interface.h` |
+| Platform | Static | Dynamic |
+|----------|--------|---------|
+| iOS (arm64 device, iOS 18.4+) | `lib/ios/libmagic_sr.a` | `lib/ios/libmagic_sr.dylib` |
+| Android (arm64-v8a) | `lib/android/libmagic_sr.a` | `lib/android/libmagic_sr.so` |
+| macOS Apple Silicon (macOS 14+) | `lib/mac_arm/libmagic_sr.a` | `lib/mac_arm/libmagic_sr.dylib` |
+| Windows (x86-64) | `lib/windows/libmagic_sr.lib` | `lib/windows/libmagic_sr.dll` |
+| Linux (x86-64, CPU spatial) | `lib/linux/libmagic_sr.a` | `lib/linux/libmagic_sr.so` |
 
-### 2.2 System & Hardware Requirements
+Apple static archives still need the system frameworks at app link time: Foundation, Metal, QuartzCore, MetalFX, MetalKit, MetalPerformanceShaders. The iOS and macOS dylibs already link those frameworks. Android `.so` already links `liblog`, `libGLESv3`, `libEGL`, and `libvulkan`.
 
-- **Android**: Android 8.0 (API Level 26) or higher. Supports Vulkan and OpenGLES 3.1+.
-- **iOS / iPadOS**: iOS 13.0+ / iPadOS 13.0+ or higher. Supports Apple Metal.
-- **macOS**: macOS 12.0+ (Apple Silicon arm64 or Intel x86_64).
-- **Windows**: Windows 10 64-bit or higher. Supports Vulkan, Direct3D 11, and OpenGL 4.3.
-- **Resolution Range**: Input width and height in `[64, 4032]`.
-- **Scaling Factors**:
-  - Spatial super-resolution: `[1.0, 8.0]`
-  - Temporal super-resolution: `(1.0, 8.0]` (scale factor `1.0` is rejected)
+iOS and macOS dylib install name: `@rpath/libmagic_sr.dylib`. How to embed the iOS dylib is in §8.
 
 ---
 
-## 3. Core API Specification
-
-All functionality is provided through three public functions in `interface/mc_interface.h`:
-
-### 3.1 `MC_Enable`
-
-```c
-int MC_Enable(void **handle, magic_frame_t *frame, input_param_t *param, output_status_params_t *status_info);
-```
-
-- **`handle` (void \*\*handle, Required)**: Pointer to the caller's algorithm handle variable.
-  - **Implicit Initialization**: If `*handle == NULL`, `MC_Enable` treats this as the initial call and creates a new handle using `param` (in this case `param` must not be `NULL`).
-  - **Integrity Validation**: If `*handle != NULL`, the handle integrity guard values (`0x11223344`, `0xaabbccdd`) are verified.
-- **`frame` (magic_frame_t \*, Optional)**: Input and output resources for the current frame.
-  - When `frame != NULL`: Executes super-resolution processing for this frame.
-  - When `frame == NULL`: Bypasses frame processing (useful for initialization-only or status-query-only calls).
-- **`param` (input_param_t \*, Optional on subsequent calls)**: Configuration parameters.
-  - Required on the initial call (`*handle == NULL`).
-  - On subsequent calls (`*handle != NULL`), passing non-NULL `param` checks if any mutable parameters (`width`, `height`, `scaler_factor`, `alg_mode`, `log_level`, `spatial_sharpen_level`, `input_type`) have changed. If changed, the handle automatically reinitializes. Pass `NULL` to retain current configuration.
-- **`status_info` (output_status_params_t \*, Optional)**: Pointer to receive status and execution statistics. Pass `NULL` if not needed.
-- **Return Value**: `0` on success; a negative error code (`MC_ERROR_*`) on failure.
-
-### 3.2 `MC_Disable`
-
-```c
-int MC_Disable(void *handle);
-```
-
-- Releases all internal resources and memory associated with `handle`.
-- Passing `NULL` is safe and performs no operation.
-- After calling `MC_Disable`, the handle is invalid and must not be used again.
-
-### 3.3 `MC_GetVersion`
-
-```c
-char *MC_GetVersion(void);
-```
-
-- Returns the library version string (e.g. `"v2.1.0"`). The returned string is statically allocated; do not attempt to free it.
-
----
-
-## 4. Quick Start: Spatial Super-Resolution
-
-Spatial super-resolution processes single frames without requiring motion vectors or depth buffers.
-
-### 4.1 Basic Lifecycle Pattern
+## 3. Quick Start (spatial, Metal)
 
 ```c
 #include "mc_interface.h"
 #include <string.h>
 
-void *g_handle = NULL;
+static void *g_handle;
 
-int init_and_process(magic_resource_t in_tex, magic_resource_t out_tex, unsigned int in_w, unsigned int in_h)
+int sr_init(const char *model_path)
 {
-    input_param_t param;
-    memset(&param, 0, sizeof(param));
-    param.struct_size = (uint32_t)sizeof(param);
-    param.input_type = INPUT_TEXTURE_RGB8Unorm;
-    param.width = in_w;
-    param.height = in_h;
-    param.scaler_factor = 2.0f;
-    param.alg_mode = SPATIAL_SPEED_MODE;      /* or SPATIAL_BALANCED_MODE */
-    param.backend = MAGIC_BACKEND_METAL;      /* or VULKAN, OPENGLES, D3D11, etc. */
-    param.log_level = MAGIC_LOG_ERROR;
-    strncpy(param.model_path, "/path/to/model.bin", sizeof(param.model_path) - 1);
+    ctrl_param_t ctrl;
 
-    magic_frame_t frame;
-    memset(&frame, 0, sizeof(frame));
-    frame.image_in = in_tex;
-    frame.image_out = out_tex;
-    frame.frame = NULL;                       /* NULL for spatial */
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.input_type = INPUT_TEXTURE_RGB8Unorm;
+    strncpy(ctrl.model_path, model_path, sizeof(ctrl.model_path) - 1);
+    ctrl.scaler_factor = 2.0f;
+    ctrl.alg_mode = SPATIAL_BALANCED_MODE;
+    ctrl.backend = MAGIC_BACKEND_METAL;
+    ctrl.log_level = MAGIC_LOG_ERROR;
+    ctrl.spatial_sharpen_level = 0; /* 0..5 */
+    ctrl.enable_msaa = 0;
+    /* ctrl.gpu_context.device = MTLDevice*; NULL uses the system default */
 
-    output_status_params_t status;
-    int ret = MC_Enable(&g_handle, &frame, &param, &status);
-    if (ret != 0) {
-        /* Handle error: see status.error_code or return code */
-        return ret;
-    }
-
-    /* Subsequent frames with same configuration: */
-    /* ret = MC_Enable(&g_handle, &frame, NULL, &status); */
-
-    return 0;
+    g_handle = NULL;
+    return mc_nscaler_control(&g_handle, MC_NSCALER_CMD_SET_PARAM, &ctrl, NULL);
 }
 
-void shutdown(void)
+int sr_process(void *in_tex, void *out_tex,
+               unsigned in_w, unsigned in_h,
+               unsigned out_w, unsigned out_h,
+               uint32_t pixel_format)
 {
-    if (g_handle) {
-        MC_Disable(g_handle);
-        g_handle = NULL;
-    }
+    mc_nscaler_input_frame_t in;
+    mc_nscaler_output_frame_t out;
+
+    memset(&in, 0, sizeof(in));
+    memset(&out, 0, sizeof(out));
+    in.handle.pointer = in_tex;     /* MTLTexture* */
+    in.format = pixel_format;       /* MTLPixelFormatRGBA8Unorm */
+    in.width = in_w;
+    in.height = in_h;
+    out.handle.pointer = out_tex;
+    out.format = pixel_format;
+    out.width = out_w;
+    out.height = out_h;
+    return mc_nscaler_enable(&g_handle, &in, &out);
+}
+
+void sr_shutdown(void)
+{
+    mc_nscaler_disable(g_handle);
+    g_handle = NULL;
 }
 ```
 
-### 4.2 Algorithm Modes
+Other backends use the same calls. The live union member depends on the backend chosen at create time:
 
-| Mode Value | Enumerator | Characteristics | Target Scenarios |
-|------------|------------|-----------------|------------------|
-| `0` | `SPATIAL_SPEED_MODE` | High throughput, lowest GPU/CPU latency | Mobile camera preview, battery-saving mode |
-| `1` | `SPATIAL_BALANCED_MODE` | Enhanced detail reconstruction | Higher quality spatial upscaling |
-| `2` | `TEMPORAL_SPEED_MODE` | High-throughput temporal reconstruction | Low-latency mobile/VR games |
-| `3` | `TEMPORAL_BALANCED_MODE` | Canonical FSR-family temporal path | Desktop and high-fidelity gaming |
+| Backend | Color handle | Notes |
+|---------|--------------|-------|
+| Metal, D3D11 | `handle.pointer` | `MTLTexture*` or `ID3D11Texture2D*` |
+| Vulkan | `handle.vk_image` | Set `format` and `layout` |
+| OpenGL / OpenGLES | `handle.gl_texture` | `GLuint`; `target` 0 means `GL_TEXTURE_2D` |
+| x86 / NEON | `handle.pointer` | CPU buffer; `input_type` is `INPUT_BUFFER_R8` or `INPUT_BUFFER_RGB` |
+
+The first `mc_nscaler_enable` must pass a non-zero `width` and `height` in `[64, 4032]`. A later call with `0, 0` keeps the current size. When both output dimensions are non-zero they must match the size produced from `scaler_factor` (each axis is `floor(value * scale + 0.5)`).
 
 ---
 
-## 5. Temporal Super-Resolution
+## 4. Lifetime
 
-Temporal super-resolution accumulates historical information across consecutive frames using color, depth buffers, motion vectors, and sub-pixel camera jitter.
+1. `SET_PARAM` with `*handle == NULL` creates the handle. `model_path`, `gpu_context`, `backend`, `depth_reversed`, `depth_infinite`, and `hdr_color` are fixed for that handle. A later `SET_PARAM` ignores changes to those fields.
+2. `mc_nscaler_enable` reads the input and writes the output. Both images stay owned by the caller.
+3. Repeating `enable` with the same size and scale reuses internal GPU resources.
+4. `mc_nscaler_disable` frees the handle. Do not use it afterward.
+5. Query status with `MC_NSCALER_CMD_QUERY_STATUS`. `output_status_params_t.error_code` is `0` on success. Negative `MC_ERROR_*` values are listed in `mc_interface.h`.
 
-### 5.1 Temporal Input Requirements
+`SET_PARAM` before the first sized `enable` uses a placeholder input of 640×360 until that `enable` supplies the real size.
 
-To execute temporal super-resolution, set `param.alg_mode` to `TEMPORAL_SPEED_MODE` or `TEMPORAL_BALANCED_MODE`, and attach a populated `temporal_frame_t` to `frame.frame`:
+---
 
-| Resource / Field | Description | Requirement |
-|------------------|-------------|-------------|
-| `magic_frame_t.image_in` | Current frame color buffer | Input resolution, RGB8Unorm / RGBA8 |
-| `magic_frame_t.image_out` | Upscaled output color buffer | Scaled output resolution |
-| `magic_frame_t.frame` | Pointer to `temporal_frame_t` | **Must not be NULL** |
-| `magic_frame_t.command_buffer` | GPU command buffer | Vulkan: recording `VkCommandBuffer`; Metal: optional; others NULL |
-| `temporal_frame_t.struct_size` | Structure size for ABI compatibility | `sizeof(temporal_frame_t)` |
-| `temporal_frame_t.depth` | Device depth buffer in `[0, 1]` | Input resolution |
-| `temporal_frame_t.motion` | Motion vectors | Input resolution, current → previous |
-| `temporal_frame_t.jitter_offset_x/y` | Sub-pixel camera jitter in input pixels | Top-left origin, +X right, +Y down |
-| `temporal_frame_t.frame_index` | Frame sequence index | Monotonically increasing |
-| `temporal_frame_t.reset_history` | Discard temporal history | Non-zero on scene cuts or teleports |
-| `temporal_frame_t.camera_near/far/fov_y` | Camera projection parameters | Near/far distances and vertical FOV (radians) |
-| `temporal_frame_t.reactive` | Optional reactive mask | Caller-provided or internally derived |
-| `temporal_frame_t.transparency` | Optional transparency/composition mask | Caller-provided or internally derived |
+## 5. Scale, Mode, and Sharpen
 
-### 5.2 Vulkan Temporal Example
+`ctrl_param_t.scaler_factor`
+
+| Mode | Range |
+|------|-------|
+| Spatial | `[1, 8]` |
+| Temporal | `(1, 8]` (1.0 is rejected) |
+| x86 / NEON | Implemented integer scales |
+
+`ctrl_param_t.alg_mode`
+
+| Value | Enum | Behavior |
+|-------|------|----------|
+| 0 | `SPATIAL_SPEED_MODE` | Spatial, throughput first |
+| 1 | `SPATIAL_BALANCED_MODE` | Spatial, quality and cost balanced |
+| 2 | `TEMPORAL_SPEED_MODE` | Temporal. See §9. |
+| 3 | `TEMPORAL_BALANCED_MODE` | Temporal. See §9. |
+
+`spatial_sharpen_level` is an integer in `[0, 5]`. `0` is off. Higher levels increase sharpening strength.
+
+`enable_msaa` is independent. Non-zero runs an extra preprocess before the selected super-resolution path.
+
+---
+
+## 6. Textures and Size
+
+GPU spatial input is `INPUT_TEXTURE_RGB8Unorm` (RGBA8). `INPUT_TEXTURE_R8Unorm` is the single-channel GPU path. CPU spatial uses `INPUT_BUFFER_R8` or `INPUT_BUFFER_RGB` (planar R, then G, then B).
+
+`magic_resource_t` and the frame structs carry no automatic size query. Pass `width` and `height` on `mc_nscaler_input_frame_t`. Vulkan `format` is a `VkFormat`. `layout` 0 means undefined and fails temporal validation; set the layout the image actually has when `enable` runs.
+
+GL / GLES do not make a context current. The calling thread must already have one on the first `enable`.
+
+---
+
+## 7. Model File
+
+Set `ctrl_param_t.model_path` to an absolute path of a readable `.bin` before the creating `SET_PARAM`. The path is at most 255 characters plus a NUL. An empty path or a file that cannot be opened returns `MC_ERROR_INIT_MODEL_FILE_OPEN_FAILED` (`-100029`) or `MC_ERROR_INIT_LOAD_PARAMS_FAILED` (`-100012`).
+
+The current combined model is `model/magic_sr_gpu_params.bin`. Spatial mode and sharpen select a segment inside that file. Pass that file's absolute path. The library does not search the working directory and does not read an environment variable for the model.
+
+`tools/setup_models.sh` only copies `.bin` files. After it runs, the app still sets `model_path` to the absolute path of the file it will load.
+
+---
+
+## 8. Dynamic Libraries
+
+### 8.1 iOS
+
+`lib/ios/libmagic_sr.dylib` is arm64, minimum iOS 18.4, install name `@rpath/libmagic_sr.dylib`. It is a device library.
+
+1. Add the dylib to the app target.
+2. Set **Frameworks, Libraries, and Embedded Content** to **Embed & Sign**. The copy lands in `YourApp.app/Frameworks/` and is re-signed.
+3. Add `@executable_path/Frameworks` to **Runpath Search Paths**.
+4. Add the `interface` directory to **Header Search Paths**.
+5. Set the app deployment target to iOS 18.4 or later. Build for iphoneos.
+
+The dylib must be loaded from inside the app bundle.
+
+### 8.2 Android
+
+`lib/android/libmagic_sr.so` is arm64-v8a. Ship it in `jniLibs/arm64-v8a` and load it with `System.loadLibrary`, or pass its path to the native link line. The static archive is `lib/android/libmagic_sr.a` when the app links MagicSR into its own `.so`.
+
+### 8.3 macOS Apple Silicon
+
+`lib/mac_arm/libmagic_sr.dylib` is arm64, minimum macOS 14, install name `@rpath/libmagic_sr.dylib`. Embed it in the app `Frameworks` folder and set the runpath to `@executable_path/../Frameworks` for a bundled app. A tool can link it with `-rpath` pointing at `lib/mac_arm`.
+
+### 8.4 Windows
+
+`lib/windows/libmagic_sr.dll` is x86-64. Link the import library `lib/windows/libmagic_sr.dll.lib`, and ship `libmagic_sr.dll` next to the executable (or on `PATH`). The static archive `lib/windows/libmagic_sr.lib` is the alternative when MagicSR is linked into the app binary.
+
+### 8.5 Linux
+
+`lib/linux/libmagic_sr.so` is x86-64. This build is the CPU spatial library. Link with `-Llib/linux -lmagic_sr` and an rpath such as `$ORIGIN` if the `.so` sits beside the executable, or pass the full path of the `.so` to the linker. Load it at runtime with `dlopen` only from a path the process is allowed to read. The static archive is `lib/linux/libmagic_sr.a`.
+
+---
+
+## 9. Temporal Super-Resolution
+
+Temporal modes accumulate history from color, depth, and motion. They are `TEMPORAL_SPEED_MODE` and `TEMPORAL_BALANCED_MODE` on the same handle API. CPU backends reject them with `MC_ERROR_INIT_BACKEND_UNAVAILABLE`.
+
+Create with `SET_PARAM`. Each `mc_nscaler_enable` must set `in_frame.frame` to a `temporal_frame_t` whose `struct_size` is `sizeof(temporal_frame_t)`.
+
+| Field | Requirement |
+|-------|-------------|
+| `depth`, `motion` | GPU resources at the input size |
+| `jitter_offset_x/y` | Input pixels, origin top-left, +X right, +Y down |
+| `frame_index`, `reset_history` | Consecutive frames should be last+1. Non-zero `reset_history` drops history on a cut or teleport |
+| `camera_near`, `camera_far`, `camera_fov_y` | View-space distances and vertical FOV in radians |
+| `in_frame.command_buffer` | Vulkan: a command buffer that is already recording. Metal: NULL (library submits) or a caller `MTLCommandBuffer`. D3D11 / GL / GLES: NULL |
+
+`motion_vector_scale_x/y` of `(0, 0)` means UV motion vectors scaled by the input size. Pixel motion vectors use `(1, 1)`. `mv_jitter` `0` means jitter is only in `jitter_offset_*`.
+
+Depth is GPU device depth in `[0, 1]`. Reversed-Z, infinite far, and HDR are create-stage fields on `ctrl_param_t` (`depth_reversed`, `depth_infinite`, `hdr_color`). Leave them 0 for conventional-Z, finite far, and LDR.
+
+Optional masks: an explicit `reactive` or `transparency` texture wins that channel. When omitted, the library derives an approximate mask. That derived mask is not a semantic transparency mask.
+
+Vulkan records into the caller's command buffer and does not submit it. Wait for that GPU work before `mc_nscaler_disable` or a size change.
 
 ```c
-#include "mc_interface.h"
-#include <string.h>
-
-static void *g_temporal_vk = NULL;
-
-int temporal_vk_init(VkPhysicalDevice phys, VkDevice dev, unsigned int in_w, unsigned int in_h)
+int temporal_vk_init(VkPhysicalDevice phys, VkDevice dev, const char *model)
 {
-    input_param_t p;
-    memset(&p, 0, sizeof(p));
-    p.struct_size = (uint32_t)sizeof(p);
-    p.input_type = INPUT_TEXTURE_RGB8Unorm;
-    p.width = in_w;
-    p.height = in_h;
-    p.scaler_factor = 2.0f;              /* Must be in (1.0, 8.0] */
-    p.alg_mode = TEMPORAL_SPEED_MODE;    /* or TEMPORAL_BALANCED_MODE */
-    p.backend = MAGIC_BACKEND_VULKAN;
-    p.log_level = MAGIC_LOG_ERROR;
-    p.gpu_context.physical_device = phys;
-    p.gpu_context.device = dev;
-    /* Optional create-stage: p.depth_reversed / p.depth_infinite / p.hdr_color */
+    ctrl_param_t ctrl;
 
-    /* Initial call creates g_temporal_vk handle */
-    return MC_Enable(&g_temporal_vk, NULL, &p, NULL);
-}
-
-int temporal_vk_process(VkCommandBuffer cmd,
-                        uint64_t color_img, uint64_t depth_img, uint64_t motion_img,
-                        uint64_t output_img,
-                        uint32_t color_fmt, uint32_t depth_fmt, uint32_t mv_fmt, uint32_t out_fmt,
-                        uint32_t color_layout, uint32_t depth_layout, uint32_t mv_layout, uint32_t out_layout,
-                        unsigned int frame_index, int reset_history)
-{
-    if (!g_temporal_vk) return -1;
-
-    temporal_frame_t tf;
-    memset(&tf, 0, sizeof(tf));
-    tf.struct_size = (uint32_t)sizeof(tf);
-    tf.depth.handle.vk_image = depth_img;
-    tf.depth.format = depth_fmt;
-    tf.depth.layout = depth_layout;
-    tf.motion.handle.vk_image = motion_img;
-    tf.motion.format = mv_fmt;
-    tf.motion.layout = mv_layout;
-    tf.jitter_offset_x = 0.0f;           /* in input pixels, +X right */
-    tf.jitter_offset_y = 0.0f;           /* in input pixels, +Y down */
-    tf.motion_vector_scale_x = 0.0f;     /* (0,0) defaults to (in_w, in_h) for UV MVs */
-    tf.motion_vector_scale_y = 0.0f;
-    tf.frame_index = frame_index;
-    tf.reset_history = reset_history;
-    tf.camera_near = 0.1f;
-    tf.camera_far = 1000.0f;
-    tf.camera_fov_y = 1.0f;              /* radians */
-    tf.view_to_meters = 1.0f;
-    tf.frame_time_delta_ms = 16.67f;
-
-    magic_frame_t frame;
-    memset(&frame, 0, sizeof(frame));
-    frame.image_in.handle.vk_image = color_img;
-    frame.image_in.format = color_fmt;
-    frame.image_in.layout = color_layout;
-    frame.image_out.handle.vk_image = output_img;
-    frame.image_out.format = out_fmt;
-    frame.image_out.layout = out_layout;
-    frame.frame = &tf;
-    frame.command_buffer = cmd;          /* Must already be recording */
-
-    output_status_params_t status;
-    return MC_Enable(&g_temporal_vk, &frame, NULL, &status);
-}
-
-void temporal_vk_shutdown(void)
-{
-    if (g_temporal_vk) {
-        MC_Disable(g_temporal_vk);
-        g_temporal_vk = NULL;
-    }
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.input_type = INPUT_TEXTURE_RGB8Unorm;
+    strncpy(ctrl.model_path, model, sizeof(ctrl.model_path) - 1);
+    ctrl.scaler_factor = 2.0f; /* (1, 8] */
+    ctrl.alg_mode = TEMPORAL_SPEED_MODE;
+    ctrl.backend = MAGIC_BACKEND_VULKAN;
+    ctrl.log_level = MAGIC_LOG_ERROR;
+    ctrl.gpu_context.physical_device = phys;
+    ctrl.gpu_context.device = dev;
+    g_handle = NULL;
+    return mc_nscaler_control(&g_handle, MC_NSCALER_CMD_SET_PARAM, &ctrl, NULL);
 }
 ```
 
-### 5.3 Backend Resource & Synchronization Contracts
+Fill `mc_nscaler_input_frame_t` / `mc_nscaler_output_frame_t` as in §3, set `in.frame` to the temporal descriptor, set `in.command_buffer` to the recording buffer, and call `mc_nscaler_enable`.
 
-| Backend | Platform | `input_param_t.gpu_context` | `magic_frame_t.command_buffer` | Resource Union Member |
-|---------|----------|-----------------------------|--------------------------------|-----------------------|
-| Metal | iOS / macOS | `device` (optional; defaults to system default) | Optional `MTLCommandBuffer` | `pointer` (`MTLTexture*`) |
-| Vulkan | Android / Windows | `physical_device` and `device` **required** | **Must be a recording `VkCommandBuffer`** | `vk_image` (`VkImage`) |
-| Direct3D 11 | Windows | `device` **required** (`device_context` optional) | Unused (`NULL`) | `pointer` (`ID3D11Texture2D*`) |
-| OpenGL 4.3 | Windows | Current context; library does not make current | Unused (`NULL`) | `gl_texture` (`GLuint`) |
-| OpenGLES | Android | Current context; library does not make current | Unused (`NULL`) | `gl_texture` (`GLuint`) |
-
-**Resource Ownership & Synchronization:**
-- **Caller Ownership**: The application owns all input/output textures, depth buffers, motion vectors, and command buffers. MagicSR owns only its internal history, scratch textures, and pipeline state objects.
-- **Vulkan Command Buffer**: MagicSR only records compute commands into the supplied `command_buffer`. It never begins, ends, submits, or waits on command buffers.
-- **Image Layouts**: In Vulkan, layouts passed in `magic_resource_t.layout` must represent the valid layout at the time of entry (`VK_IMAGE_LAYOUT_UNDEFINED` is rejected).
-
-### 5.4 Motion Vectors, Depth, and Masks
-
-- **Motion Vectors (MV)**: Defined as **current frame → previous frame**. The library never negates motion vectors. Coordinates are +X right, +Y down.
-- **MV Scale (`motion_vector_scale_x/y`)**: Stored motion multiplied by this factor yields pixel displacement. `(0,0)` defaults to `(input_width, input_height)` for normalized UV motion vectors. Use `(1,1)` for pixel-space motion vectors.
-- **Depth**: Must be GPU device depth in `[0, 1]`. Reversed-Z and infinite far plane configurations are specified at creation stage via `input_param_t.depth_reversed` and `depth_infinite`.
-- **Mask Derivation**: If `reactive` or `transparency` masks are omitted, MagicSR derives approximate masks internally. Explicit caller-provided masks always take precedence.
+| Backend | `gpu_context` | Command buffer |
+|---------|---------------|----------------|
+| Metal | `device` may be NULL | Optional |
+| Vulkan | `physical_device` and `device` required | Recording buffer required |
+| D3D11 | `device` required; `device_context` NULL means immediate | NULL |
+| OpenGL / GLES | Current context | NULL |
 
 ---
 
-## 6. Model Files & Deployment
+## 10. FAQ
 
-### 6.1 Setup Script (`tools/setup_models.sh`)
+**Q: `SET_PARAM` or `enable` returns a negative code?**
+A: Read `output_status_params_t.error_code` and the `MC_ERROR_*` list in `mc_interface.h`. Common create failures: model path (`-100029`, `-100012`), size outside `[64, 4032]` (`-100002`, `-100003`), scale out of range (`-100004`), GPU device missing (`-100025`).
 
-Use the included helper script to copy model binaries from `model/` to your target directory:
+**Q: Which library do I link?**
+A: One file from §2. Static `.a` / `.lib` or the matching dynamic library. The header is always `mc_interface.h`.
 
-```bash
-# macOS / Linux
-./tools/setup_models.sh demo     # Copies models to Android/iOS demo folders
-./tools/setup_models.sh local    # Copies models to ./MagicSRModels/
-./tools/setup_models.sh adb      # Pushes models to connected Android device
-```
+**Q: Who allocates the output texture?**
+A: The caller. Pass it on `mc_nscaler_output_frame_t`. Release it with the graphics API that created it, after `mc_nscaler_disable` or after the GPU work that used it has finished.
 
-### 6.2 Model Filenames
+**Q: Can several handles run at once?**
+A: Yes. Each `void *` from `SET_PARAM` is an independent handle.
 
-| Platform | Backend | Speed Model | Balanced Model | Temporal Model |
-|----------|---------|-------------|----------------|----------------|
-| Android | OpenGLES | `magic_gles_speed_gpu_params.bin` | `magic_gles_balanced_gpu_params.bin` | `magic_temporal_sr_gpu_params.bin` |
-| Android | Vulkan | `magic_vulkan_speed_gpu_params.bin` | `magic_vulkan_balanced_gpu_params.bin` | `magic_temporal_sr_gpu_params.bin` |
-| iOS / macOS | Metal | `magic_metal_speed_gpu_params.bin` | `magic_metal_balanced_gpu_params.bin` | `magic_temporal_sr_gpu_params.bin` |
-| Windows | Vulkan / D3D11 / GL | `magic_gl_speed_gpu_params.bin` | `magic_gl_balanced_gpu_params.bin` | `magic_temporal_sr_gpu_params.bin` |
+**Q: Where does the model path go?**
+A: `ctrl_param_t.model_path`, an absolute path, on the creating `SET_PARAM`. See §7.
 
-In production applications, pass the explicit path to the model file or model directory in `input_param_t.model_path`.
+**Q: What does sharpen do?**
+A: `spatial_sharpen_level` is 0 through 5. 0 turns sharpening off. Higher values increase strength.
 
 ---
 
-## 7. Status Query and Error Handling
+## 11. Deliverables
 
-### 7.1 Reading Execution Status
-
-Pass a pointer to `output_status_params_t` into `MC_Enable` to query execution metrics:
-
-```c
-output_status_params_t status;
-int ret = MC_Enable(&handle, &frame, NULL, &status);
-if (ret == 0) {
-    printf("GPU Time: %.2f ms, Error Code: %u\n", status.gpu_time, status.error_code);
-    if (status.temporal_status_valid) {
-        printf("Last Temporal Frame Index: %u\n", status.temporal_frame_index);
-    }
-}
-```
-
-### 7.2 Common Error Codes
-
-| Error Code | Constant | Meaning / Resolution |
-|------------|----------|----------------------|
-| `-100001` | `MC_ERROR_INIT_NULL_PARAM` | Initial call (`*handle == NULL`) received `param == NULL`. |
-| `-100004` | `MC_ERROR_INIT_SCALER_OUT_OF_RANGE` | Scale factor is invalid (spatial must be `[1.0, 8.0]`, temporal `(1.0, 8.0]`). |
-| `-100008` | `MC_ERROR_INIT_BACKEND_UNAVAILABLE` | Requested backend is not compiled into this binary build. |
-| `-100025` | `MC_ERROR_INIT_GPU_CREATE_FAILED` | Failed to initialize GPU device (e.g. missing `gpu_context` device pointers). |
-| `-100029` | `MC_ERROR_INIT_MODEL_FILE_OPEN_FAILED` | Model binary could not be opened (verify `param.model_path`). |
-| `-101001` | `MC_ERROR_PROCESS_NULL_HANDLE` | `MC_Enable` received `handle == NULL` or `*handle == NULL`. |
-| `-101002` | `MC_ERROR_PROCESS_HANDLE_CORRUPTED` | Handle memory integrity check failed (corrupted memory). |
-| `-105001` | `MC_ERROR_TEMPORAL_NULL_FRAME` | Temporal mode requires `frame->frame != NULL`. |
-| `-105003..6` | `MC_ERROR_TEMPORAL_MISSING_*` | Required color, output, depth, or motion resource handle is missing. |
-| `-105017` | `MC_ERROR_TEMPORAL_COMMAND_BUFFER` | Vulkan temporal requires a valid recording `VkCommandBuffer`. |
+| Item | Path |
+|------|------|
+| Header | `interface/mc_interface.h` |
+| iOS static / dynamic | `lib/ios/libmagic_sr.a`, `lib/ios/libmagic_sr.dylib` |
+| Android static / dynamic | `lib/android/libmagic_sr.a`, `lib/android/libmagic_sr.so` |
+| macOS arm static / dynamic | `lib/mac_arm/libmagic_sr.a`, `lib/mac_arm/libmagic_sr.dylib` |
+| Windows static / dynamic | `lib/windows/libmagic_sr.lib`, `lib/windows/libmagic_sr.dll` (import library `lib/windows/libmagic_sr.dll.lib`) |
+| Linux static / dynamic | `lib/linux/libmagic_sr.a`, `lib/linux/libmagic_sr.so` |
+| Combined model | `model/magic_sr_gpu_params.bin` |
+| License | `doc/版本文档/MagicCode Super-Resolution Software End User License Agreement (EULA).pdf` |
 
 ---
 
-## 8. Migration from Previous Versions
+## 12. Support
 
-If upgrading from v1.x or v2.0:
-1. **Single Library**: Remove any references to `libmagic_sr_enable.a` or `libmagic_enable_sr.lib`. Link only `libmagic_sr.a` (or `libmagic_sr.lib`).
-2. **Single Header**: Remove `#include "mc_enable.h"`. Include only `mc_interface.h`.
-3. **Consolidated API**:
-   - Replace separate `MC_Init(...)` and `MC_Process(...)` calls with unified `MC_Enable(&handle, &frame, &param, &status)`.
-   - Replace `MC_Uninit(...)` with `MC_Disable(handle)`.
-   - Remove usage of removed structures: `control_param_t`, `cmd_params_e`. Mutable parameter updates are handled by passing `param` to `MC_Enable`.
-4. **Version Query**: Verify `MC_GetVersion()` returns `"v2.1.0"`.
+Contact MagicCode support with the platform, `mc_nscaler_version()` string, backend, model filename, the `MC_ERROR_*` code, and a minimal project when possible.

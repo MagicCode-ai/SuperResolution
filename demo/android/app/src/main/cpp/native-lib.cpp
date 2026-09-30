@@ -42,7 +42,6 @@ static unsigned int g_session_in_h = 0;
 static unsigned int g_session_out_w = 0;
 static unsigned int g_session_out_h = 0;
 static bool g_logged_first_process = false;
-static unsigned int g_process_ok_count = 0;
 
 static EGLDisplay g_display = EGL_NO_DISPLAY;
 static EGLContext g_context = EGL_NO_CONTEXT;
@@ -81,14 +80,6 @@ static int java_array_covers(JNIEnv *env, jbyteArray arr, size_t need) {
     /* Java arrays cannot exceed Integer.MAX_VALUE bytes. */
     if (need > (size_t)INT32_MAX) return 0;
     return (size_t)n >= need;
-}
-
-static void fill_gles_resource(magic_resource_t *res, GLuint tex) {
-    memset(res, 0, sizeof(*res));
-    res->handle.gl_texture = tex;
-    res->format = (uint32_t)GL_RGBA8;
-    res->target = (uint32_t)GL_TEXTURE_2D;
-    res->mip_count = 1;
 }
 
 static bool make_gles_current() {
@@ -216,15 +207,15 @@ static void forget_session_size() {
     g_session_out_w = g_session_out_h = 0;
 }
 
-/* Order: MC_Disable, delete textures (current context), then destroy EGL. */
+/* Order: mc_nscaler_disable, delete textures (current context), then destroy EGL. */
 static void release_session() {
     if (g_sr_handle) {
         if (!make_gles_current()) {
-            LOGE("eglMakeCurrent failed before MC_Disable; calling Disable anyway");
+            LOGE("eglMakeCurrent failed before mc_nscaler_disable; calling disable anyway");
         }
-        const int ur = MC_Disable(g_sr_handle);
+        const int ur = mc_nscaler_disable(g_sr_handle);
         if (ur != 0) {
-            LOGE("MC_Disable failed ret=%d", ur);
+            LOGE("mc_nscaler_disable failed ret=%d", ur);
         }
         g_sr_handle = nullptr;
     }
@@ -237,7 +228,6 @@ static void release_session() {
     destroy_egl();
     forget_session_size();
     g_logged_first_process = false;
-    g_process_ok_count = 0;
 }
 
 static bool ensure_gles_io_textures(int in_w, int in_h, int out_w, int out_h) {
@@ -305,7 +295,7 @@ static uint8_t *gles_readback_rgba(GLuint tex, int width, int height) {
 static int cache_session_size_from_handle() {
     output_status_params_t st;
     memset(&st, 0, sizeof(st));
-    if (MC_Enable(&g_sr_handle, nullptr, nullptr, &st) != 0) {
+    if (mc_nscaler_control(&g_sr_handle, MC_NSCALER_CMD_QUERY_STATUS, nullptr, &st) != 0) {
         return -1;
     }
     g_session_in_w = st.width;
@@ -350,48 +340,33 @@ Java_com_example_superresolution_natives_SuperResolutionLib_initSuperResolution(
     }
 
     const char *model_path_cstr = model_path ? env->GetStringUTFChars(model_path, nullptr) : "";
-    input_param_t param;
-    memset(&param, 0, sizeof(param));
-    param.struct_size = (uint32_t)sizeof(param);
-    param.input_type = INPUT_TEXTURE_RGB8Unorm;
-    param.width = (unsigned int)width;
-    param.height = (unsigned int)height;
-    param.scaler_factor = scaler_factor;
-    param.alg_mode = g_mode;
-    param.log_level = MAGIC_LOG_INFO;
-    param.backend = MAGIC_BACKEND_OPENGLES;
-    param.spatial_sharpen_level = 0;
-    param.gpu_context.native_context = (void *)g_context;
+    ctrl_param_t ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.input_type = INPUT_TEXTURE_RGB8Unorm;
+    ctrl.scaler_factor = scaler_factor;
+    ctrl.alg_mode = g_mode;
+    ctrl.log_level = MAGIC_LOG_INFO;
+    ctrl.backend = MAGIC_BACKEND_OPENGLES;
+    ctrl.spatial_sharpen_level = 0;
+    ctrl.gpu_context.native_context = (void *)g_context;
     if (model_path_cstr && model_path_cstr[0] != '\0') {
-        strncpy(param.model_path, model_path_cstr, sizeof(param.model_path) - 1);
+        strncpy(ctrl.model_path, model_path_cstr, sizeof(ctrl.model_path) - 1);
     }
     if (model_path) env->ReleaseStringUTFChars(model_path, model_path_cstr);
 
-    output_status_params_t init_st;
-    memset(&init_st, 0, sizeof(init_st));
-    int init_rc = MC_Enable(&g_sr_handle, nullptr, &param, &init_st);
+    g_sr_handle = nullptr;
+    int init_rc = mc_nscaler_control(&g_sr_handle, MC_NSCALER_CMD_SET_PARAM, &ctrl, nullptr);
     if (init_rc != 0 || !g_sr_handle) {
-        LOGE("MC_Enable init failed rc=%d scale=%.3f mode=%d %dx%d", init_rc, g_scale, (int)g_mode, width, height);
+        LOGE("mc_nscaler_control failed rc=%d scale=%.3f mode=%d %dx%d", init_rc, g_scale, (int)g_mode, width, height);
         release_session();
         return 0;
     }
-    g_session_in_w = init_st.width;
-    g_session_in_h = init_st.height;
-    g_session_out_w = init_st.output_width;
-    g_session_out_h = init_st.output_height;
-    g_scale = init_st.scaler_factor;
-    const uint32_t expect_out_w = scaled_dimension((uint32_t)width, scaler_factor);
-    const uint32_t expect_out_h = scaled_dimension((uint32_t)height, scaler_factor);
-    if (g_session_in_w != (unsigned)width || g_session_in_h != (unsigned)height ||
-        g_session_out_w != expect_out_w || g_session_out_h != expect_out_h) {
-        LOGE("MC_Enable size contract mismatch session=%ux%u->%ux%u expect=%dx%d->%ux%u",
-             g_session_in_w, g_session_in_h, g_session_out_w, g_session_out_h,
-             width, height, (unsigned)expect_out_w, (unsigned)expect_out_h);
-        release_session();
-        return 0;
-    }
-    LOGI("MC_Enable init ok version=%s scale=%.3f mode=%d %ux%u -> %ux%u",
-         MC_GetVersion(), g_scale, (int)g_mode,
+    g_session_in_w = (unsigned)width;
+    g_session_in_h = (unsigned)height;
+    g_session_out_w = scaled_dimension((uint32_t)width, scaler_factor);
+    g_session_out_h = scaled_dimension((uint32_t)height, scaler_factor);
+    LOGI("mc_nscaler_control ok version=%s scale=%.3f mode=%d %ux%u -> %ux%u",
+         mc_nscaler_version(), g_scale, (int)g_mode,
          g_session_in_w, g_session_in_h, g_session_out_w, g_session_out_h);
     return (jlong)(uintptr_t)g_sr_handle;
 }
@@ -422,19 +397,14 @@ Java_com_example_superresolution_natives_SuperResolutionLib_processImage(
     if (!java_array_covers(env, input, in_need)) return JNI_ERR_INPUT_LEN;
     if (!java_array_covers(env, output, out_need)) return JNI_ERR_OUTPUT_LEN;
 
-    output_status_params_t st;
-    memset(&st, 0, sizeof(st));
-    if (MC_Enable(&g_sr_handle, nullptr, nullptr, &st) != 0) {
-        return JNI_ERR_SESSION_QUERY;
-    }
-    if (st.width != (unsigned)input_width || st.height != (unsigned)input_height) {
+    if (g_session_in_w != (unsigned)input_width || g_session_in_h != (unsigned)input_height) {
         LOGE("process input %dx%d != session %ux%u",
-             input_width, input_height, st.width, st.height);
+             input_width, input_height, g_session_in_w, g_session_in_h);
         return JNI_ERR_SESSION_INPUT;
     }
-    if (st.output_width != (unsigned)output_width || st.output_height != (unsigned)output_height) {
+    if (g_session_out_w != (unsigned)output_width || g_session_out_h != (unsigned)output_height) {
         LOGE("process output %dx%d != session %ux%u",
-             output_width, output_height, st.output_width, st.output_height);
+             output_width, output_height, g_session_out_w, g_session_out_h);
         return JNI_ERR_SESSION_OUTPUT;
     }
 
@@ -454,30 +424,35 @@ Java_com_example_superresolution_natives_SuperResolutionLib_processImage(
 
     gles_upload_rgba(g_input_tex, input_width, input_height, (const uint8_t *)in_bytes);
 
-    magic_frame_t frame;
-    memset(&frame, 0, sizeof(frame));
-    fill_gles_resource(&frame.image_in, g_input_tex);
-    fill_gles_resource(&frame.image_out, g_output_tex);
-    frame.frame = nullptr;
-    frame.command_buffer = nullptr;
+    mc_nscaler_input_frame_t in_frame;
+    mc_nscaler_output_frame_t out_frame;
+    memset(&in_frame, 0, sizeof(in_frame));
+    memset(&out_frame, 0, sizeof(out_frame));
+    in_frame.handle.gl_texture = g_input_tex;
+    in_frame.format = (uint32_t)GL_RGBA8;
+    in_frame.target = (uint32_t)GL_TEXTURE_2D;
+    in_frame.mip_count = 1;
+    in_frame.width = (unsigned)input_width;
+    in_frame.height = (unsigned)input_height;
+    out_frame.handle.gl_texture = g_output_tex;
+    out_frame.format = (uint32_t)GL_RGBA8;
+    out_frame.target = (uint32_t)GL_TEXTURE_2D;
+    out_frame.mip_count = 1;
+    out_frame.width = (unsigned)output_width;
+    out_frame.height = (unsigned)output_height;
 
-    int ret = MC_Enable(&g_sr_handle, &frame, nullptr, nullptr);
+    int ret = mc_nscaler_enable(&g_sr_handle, &in_frame, &out_frame);
     if (ret != 0) {
-        LOGE("MC_Enable failed ret=%d", ret);
+        LOGE("mc_nscaler_enable failed ret=%d", ret);
         env->ReleaseByteArrayElements(input, in_bytes, JNI_ABORT);
         env->ReleaseByteArrayElements(output, out_bytes, JNI_ABORT);
         return ret;
     }
-    g_process_ok_count++;
     if (!g_logged_first_process) {
         g_logged_first_process = true;
-        LOGI("MC_Enable first ok version=%s ret=0 in=%dx%d out=%dx%d scale=%.3f mode=%d",
-             MC_GetVersion(), input_width, input_height, output_width, output_height,
+        LOGI("mc_nscaler_enable first ok version=%s ret=0 in=%dx%d out=%dx%d scale=%.3f mode=%d",
+             mc_nscaler_version(), input_width, input_height, output_width, output_height,
              g_scale, (int)g_mode);
-    } else if (g_process_ok_count == 2u) {
-        LOGI("MC_Enable subsequent ok version=%s ret=0 frame=%u in=%dx%d out=%dx%d scale=%.3f mode=%d",
-             MC_GetVersion(), g_process_ok_count, input_width, input_height, output_width,
-             output_height, g_scale, (int)g_mode);
     }
     glFinish();
 
@@ -492,13 +467,6 @@ Java_com_example_superresolution_natives_SuperResolutionLib_processImage(
     env->ReleaseByteArrayElements(input, in_bytes, JNI_ABORT);
     env->ReleaseByteArrayElements(output, out_bytes, ret == 0 ? 0 : JNI_ABORT);
     return ret;
-}
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_example_superresolution_natives_SuperResolutionLib_getVersion(
-        JNIEnv *env,
-        jclass) {
-    return env->NewStringUTF(MC_GetVersion());
 }
 
 extern "C" JNIEXPORT void JNICALL

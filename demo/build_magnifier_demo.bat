@@ -3,15 +3,14 @@ setlocal enableextensions
 
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
-for %%I in ("%ROOT%\..") do set "REPO_ROOT=%%~fI"
 
 set "ANDROID_DIR=%ROOT%\android"
 set "GRADLEW=%ANDROID_DIR%\gradlew.bat"
 set "ASSETS_MODEL_DIR=%ANDROID_DIR%\app\src\main\assets\model"
-set "MODEL_DIR=%REPO_ROOT%\model"
-set "ANDROID_LIB_DIR=%REPO_ROOT%\lib\android"
-set "IOS_LIB_DIR=%REPO_ROOT%\lib\ios"
-set "INTERFACE_DIR=%REPO_ROOT%\interface"
+set "MODEL_DIR=%ROOT%\model"
+set "ANDROID_LIB_DIR=%ROOT%\..\..\lib\android"
+set "IOS_LIB_DIR=%ROOT%\..\..\lib\ios"
+set "INTERFACE_DIR=%ROOT%\..\..\interface"
 
 echo [INFO] Root: %ROOT%
 
@@ -24,6 +23,11 @@ call :require_file "%INTERFACE_DIR%\mc_interface.h"
 call :require_file "%ANDROID_LIB_DIR%\libmagic_sr.a"
 call :require_file "%IOS_LIB_DIR%\libmagic_sr.a"
 
+call :require_file "%MODEL_DIR%\magic_gles_speed_gpu_params.bin"
+call :require_file "%MODEL_DIR%\magic_gles_balanced_gpu_params.bin"
+call :require_file "%MODEL_DIR%\magic_metal_speed_gpu_params.bin"
+call :require_file "%MODEL_DIR%\magic_metal_balanced_gpu_params.bin"
+
 if not exist "%ASSETS_MODEL_DIR%" (
   echo [INFO] Creating Android assets model directory...
   mkdir "%ASSETS_MODEL_DIR%"
@@ -33,11 +37,17 @@ if not exist "%ASSETS_MODEL_DIR%" (
   )
 )
 
-echo [INFO] Copying Android GLES model files (if present)...
-if exist "%MODEL_DIR%\magic_gles_speed_gpu_params.bin" copy /Y "%MODEL_DIR%\magic_gles_speed_gpu_params.bin" "%ASSETS_MODEL_DIR%\" >nul
-if exist "%MODEL_DIR%\magic_gles_balanced_gpu_params.bin" copy /Y "%MODEL_DIR%\magic_gles_balanced_gpu_params.bin" "%ASSETS_MODEL_DIR%\" >nul
-if exist "%MODEL_DIR%\magic_gles_highspeed_gpu_params.bin" copy /Y "%MODEL_DIR%\magic_gles_highspeed_gpu_params.bin" "%ASSETS_MODEL_DIR%\" >nul
-if exist "%MODEL_DIR%\magic_sr_gpu_params.bin" copy /Y "%MODEL_DIR%\magic_sr_gpu_params.bin" "%ASSETS_MODEL_DIR%\" >nul
+echo [INFO] Copying Android model files...
+copy /Y "%MODEL_DIR%\magic_gles_speed_gpu_params.bin" "%ASSETS_MODEL_DIR%\" >nul
+if errorlevel 1 (
+  echo [ERROR] Failed to copy magic_gles_speed_gpu_params.bin
+  exit /b 1
+)
+copy /Y "%MODEL_DIR%\magic_gles_balanced_gpu_params.bin" "%ASSETS_MODEL_DIR%\" >nul
+if errorlevel 1 (
+  echo [ERROR] Failed to copy magic_gles_balanced_gpu_params.bin
+  exit /b 1
+)
 
 echo [INFO] Building Android Debug APK...
 pushd "%ANDROID_DIR%"

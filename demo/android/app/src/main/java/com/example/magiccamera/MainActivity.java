@@ -458,7 +458,7 @@ public class MainActivity extends AppCompatActivity {
             }
             if (ret != 0) {
                 // Transient failures (e.g. mid-scale rebuild) should not kill the camera.
-                Log.w(TAG, "MC_Enable failed ret=" + ret + " crop=" + cropW + "x" + cropH
+                Log.w(TAG, "MC_Process failed ret=" + ret + " crop=" + cropW + "x" + cropH
                         + " scale=" + scale + " — skip frame");
                 return;
             }
@@ -551,7 +551,7 @@ public class MainActivity extends AppCompatActivity {
             engineInitMode = -1;
             currentModelPath = "";
             engineDirty = true;
-            throw new IllegalStateException("MC_Enable init failed, model=" + modelPath);
+            throw new IllegalStateException("MC_Process init failed, model=" + modelPath);
         }
         engineInitWidth = width;
         engineInitHeight = height;
@@ -564,7 +564,7 @@ public class MainActivity extends AppCompatActivity {
     private void restartEngine() {
         // Mark dirty only. Native handle stays live until the next camera-thread
         // ensureEngineLocked() or onDestroy() — never Uninit from the UI thread
-        // while a frame may be inside MC_Enable.
+        // while a frame may be inside MC_Process.
         synchronized (engineLock) {
             engineDirty = true;
             engineInitWidth = -1;

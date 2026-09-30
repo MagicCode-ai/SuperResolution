@@ -46,7 +46,6 @@ static const NSTimeInterval kScaleApplyDelay = 0.08;
 @property(nonatomic) size_t outputTexWidth;
 @property(nonatomic) size_t outputTexHeight;
 @property(nonatomic) BOOL loggedFirstProcess;
-@property(nonatomic) unsigned int processOkCount;
 @end
 
 @implementation ViewController
@@ -68,8 +67,7 @@ static const NSTimeInterval kScaleApplyDelay = 0.08;
     self.engineScale = -1.0f;
     self.engineMode = (alg_mode_e)MAX_ALG_MODE;
     self.loggedFirstProcess = NO;
-    self.processOkCount = 0;
-    NSLog(@"[MagicMagnifierSR] loaded MC_GetVersion=%s", MC_GetVersion());
+    NSLog(@"[MagicMagnifierSR] loaded mc_nscaler_version=%s", mc_nscaler_version());
     [self buildUi];
 
     @try {
@@ -117,7 +115,7 @@ static const NSTimeInterval kScaleApplyDelay = 0.08;
     [self.modeControl addTarget:self action:@selector(modeChanged:) forControlEvents:UIControlEventValueChanged];
 
     UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    versionLabel.text = [NSString stringWithFormat:@"MagicSR %s", MC_GetVersion()];
+    versionLabel.text = [NSString stringWithFormat:@"MagicSR %s", mc_nscaler_version()];
     versionLabel.textColor = [UIColor.whiteColor colorWithAlphaComponent:0.85];
     versionLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
     versionLabel.textAlignment = NSTextAlignmentRight;
@@ -414,50 +412,48 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         outW = self.outputTexWidth;
         outH = self.outputTexHeight;
 
-        magic_frame_t frame;
-        memset(&frame, 0, sizeof(frame));
-        frame.image_in.handle.pointer = (__bridge void *)self.inputTexture;
-        frame.image_in.format = (uint32_t)MTLPixelFormatRGBA8Unorm;
-        frame.image_in.mip_count = 1;
-        frame.image_out.handle.pointer = (__bridge void *)self.outputTexture;
-        frame.image_out.format = (uint32_t)MTLPixelFormatRGBA8Unorm;
-        frame.image_out.mip_count = 1;
-        frame.frame = NULL;
-        /* Spatial Metal: MC_Enable ignores command_buffer and waits internally
-         * (speed_sr_process / balanced_sr_process commit + waitUntilCompleted). */
-        frame.command_buffer = NULL;
+        mc_nscaler_input_frame_t inFrame;
+        mc_nscaler_output_frame_t outFrame;
+        memset(&inFrame, 0, sizeof(inFrame));
+        memset(&outFrame, 0, sizeof(outFrame));
+        inFrame.handle.pointer = (__bridge void *)self.inputTexture;
+        inFrame.format = (uint32_t)MTLPixelFormatRGBA8Unorm;
+        inFrame.mip_count = 1;
+        inFrame.width = (unsigned int)cropW;
+        inFrame.height = (unsigned int)cropH;
+        outFrame.handle.pointer = (__bridge void *)self.outputTexture;
+        outFrame.format = (uint32_t)MTLPixelFormatRGBA8Unorm;
+        outFrame.mip_count = 1;
+        outFrame.width = (unsigned int)outW;
+        outFrame.height = (unsigned int)outH;
 
         void *h = self.srHandle;
-        int ret = MC_Enable(&h, &frame, NULL, NULL);
+        int ret = mc_nscaler_enable(&h, &inFrame, &outFrame);
         self.srHandle = h;
         if (ret != 0) {
             @throw [NSException exceptionWithName:@"MCProcessError"
-                                           reason:[NSString stringWithFormat:@"MC_Enable failed ret=%d scale=%.2f mode=%d",
+                                           reason:[NSString stringWithFormat:@"mc_nscaler_enable failed ret=%d scale=%.2f mode=%d",
                                                    ret, self.selectedScale, (int)self.selectedMode]
                                          userInfo:nil];
         }
-        self.processOkCount += 1;
         if (!self.loggedFirstProcess) {
             self.loggedFirstProcess = YES;
-            NSLog(@"[MagicMagnifierSR] MC_Enable first ok version=%s ret=0 in=%zux%zu out=%zux%zu scale=%.3f mode=%d",
-                  MC_GetVersion(), cropW, cropH, outW, outH, self.selectedScale, (int)self.selectedMode);
-        } else if (self.processOkCount == 2) {
-            NSLog(@"[MagicMagnifierSR] MC_Enable subsequent ok version=%s ret=0 frame=%u in=%zux%zu out=%zux%zu scale=%.3f mode=%d",
-                  MC_GetVersion(), self.processOkCount, cropW, cropH, outW, outH, self.selectedScale, (int)self.selectedMode);
+            NSLog(@"[MagicMagnifierSR] mc_nscaler_enable first ok version=%s ret=0 in=%zux%zu out=%zux%zu scale=%.3f mode=%d",
+                  mc_nscaler_version(), cropW, cropH, outW, outH, self.selectedScale, (int)self.selectedMode);
         }
 
         size_t outputBytes = outW * outH * 4;
         if (!self.outputRgbaData || self.outputRgbaData.length != outputBytes) {
             self.outputRgbaData = [NSMutableData dataWithLength:outputBytes];
         }
-        /* Safe: spatial MC_Enable returned after GPU waitUntilCompleted. */
+        /* Safe: spatial mc_nscaler_enable returned after GPU waitUntilCompleted. */
         [self.outputTexture getBytes:self.outputRgbaData.mutableBytes
                           bytesPerRow:outW * 4
                            fromRegion:MTLRegionMake2D(0, 0, outW, outH)
                           mipmapLevel:0];
         UIImage *img = [self imageFromRgbaData:self.outputRgbaData width:outW height:outH];
         NSString *status = [NSString stringWithFormat:@"ver=%s mode=%@ scale=x%@ crop=%zux%zu out=%zux%zu",
-                            MC_GetVersion(),
+                            mc_nscaler_version(),
                             self.selectedMode == SPATIAL_BALANCED_MODE ? @"balanced" : @"speed",
                             [self formatScale:self.selectedScale],
                             cropW, cropH, outW, outH];
@@ -485,61 +481,44 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     if (self.srHandle) {
-        int ur = MC_Disable(self.srHandle);
+        int ur = mc_nscaler_disable(self.srHandle);
         if (ur != 0) {
-            NSLog(@"[MagicMagnifierSR] MC_Disable failed ret=%d", ur);
+            NSLog(@"[MagicMagnifierSR] mc_nscaler_disable failed ret=%d", ur);
         }
         self.srHandle = NULL;
     }
 
     NSString *modelPath = [self modelPathForCurrentMode];
-    input_param_t param;
-    memset(&param, 0, sizeof(param));
-    param.struct_size = (uint32_t)sizeof(param);
-    param.input_type = INPUT_TEXTURE_RGB8Unorm;
-    param.width = (unsigned int)width;
-    param.height = (unsigned int)height;
-    param.scaler_factor = scale;
-    param.alg_mode = mode;
-    param.log_level = MAGIC_LOG_INFO;
-    param.backend = MAGIC_BACKEND_METAL;
-    param.spatial_sharpen_level = 0;
-    param.gpu_context.device = (__bridge void *)self.device;
-    strncpy(param.model_path, modelPath.UTF8String, sizeof(param.model_path) - 1);
+    ctrl_param_t ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.input_type = INPUT_TEXTURE_RGB8Unorm;
+    ctrl.scaler_factor = scale;
+    ctrl.alg_mode = mode;
+    ctrl.log_level = MAGIC_LOG_INFO;
+    ctrl.backend = MAGIC_BACKEND_METAL;
+    ctrl.spatial_sharpen_level = 0;
+    ctrl.gpu_context.device = (__bridge void *)self.device;
+    strncpy(ctrl.model_path, modelPath.UTF8String, sizeof(ctrl.model_path) - 1);
 
-    output_status_params_t st;
-    memset(&st, 0, sizeof(st));
     void *h = NULL;
-    int rc = MC_Enable(&h, NULL, &param, &st);
+    int rc = mc_nscaler_control(&h, MC_NSCALER_CMD_SET_PARAM, &ctrl, NULL);
     self.srHandle = h;
     if (rc != 0 || !self.srHandle) {
         @throw [NSException exceptionWithName:@"MCInitError"
-                                       reason:[NSString stringWithFormat:@"MC_Enable init failed rc=%d scale=%.2f mode=%d model=%@",
+                                       reason:[NSString stringWithFormat:@"mc_nscaler_control failed rc=%d scale=%.2f mode=%d model=%@",
                                                rc, scale, (int)mode, modelPath]
                                      userInfo:nil];
     }
-    if (st.width != (unsigned)width || st.height != (unsigned)height) {
-        int ur = MC_Disable(self.srHandle);
-        if (ur != 0) {
-            NSLog(@"[MagicMagnifierSR] MC_Disable failed ret=%d after size mismatch", ur);
-        }
-        self.srHandle = NULL;
-        @throw [NSException exceptionWithName:@"MCInitError"
-                                       reason:[NSString stringWithFormat:@"session input %ux%u != %zux%zu",
-                                               st.width, st.height, width, height]
-                                     userInfo:nil];
-    }
-    size_t coreOutW = st.output_width;
-    size_t coreOutH = st.output_height;
+    size_t coreOutW = [self scaledDimension:width scale:scale];
+    size_t coreOutH = [self scaledDimension:height scale:scale];
     if (coreOutW != self.outputTexWidth || coreOutH != self.outputTexHeight) {
         [self ensureOutputTextureForWidth:coreOutW height:coreOutH];
     }
     self.engineScale = scale;
     self.engineMode = mode;
     self.loggedFirstProcess = NO;
-    self.processOkCount = 0;
-    NSLog(@"[MagicMagnifierSR] MC_Enable init ok version=%s scale=%.3f mode=%d %zux%zu -> %ux%u model=%@",
-          MC_GetVersion(), scale, (int)mode, width, height, st.output_width, st.output_height, modelPath);
+    NSLog(@"[MagicMagnifierSR] mc_nscaler_control ok version=%s scale=%.3f mode=%d %zux%zu -> %zux%zu model=%@",
+          mc_nscaler_version(), scale, (int)mode, width, height, coreOutW, coreOutH, modelPath);
 }
 
 - (size_t)scaledDimension:(size_t)value scale:(float)scaler {
@@ -722,9 +701,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)restartEngineUnsafe {
     if (self.srHandle) {
-        int ur = MC_Disable(self.srHandle);
+        int ur = mc_nscaler_disable(self.srHandle);
         if (ur != 0) {
-            NSLog(@"[MagicMagnifierSR] MC_Disable failed ret=%d", ur);
+            NSLog(@"[MagicMagnifierSR] mc_nscaler_disable failed ret=%d", ur);
         }
         self.srHandle = NULL;
     }
@@ -742,7 +721,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     self.engineScale = -1.0f;
     self.engineMode = (alg_mode_e)MAX_ALG_MODE;
     self.loggedFirstProcess = NO;
-    self.processOkCount = 0;
 }
 
 - (void)failAndStop:(NSString *)message {
