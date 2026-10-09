@@ -116,16 +116,91 @@ MagicSR supports mainstream CPU and GPU backends:
 
 ## Quick Start
 
-Quick integration via the Enable API: include the header, set the model directory, enable with an input texture and scale, then disable when finished.
+Include `interface/mc_interface.h` and link one library from `lib/` (`libmagic_sr.a` or the matching dynamic library). The caller owns every texture and CPU buffer. `mc_nscaler_disable` releases the handle.
+
+`mc_nscaler_enable` creates the handle when `*handle` is NULL, then processes that frame. The input size comes from `in_frame`. Built-in defaults are scale 2, `SPATIAL_SPEED_MODE`, `MAGIC_BACKEND_DEFAULT`, `INPUT_BUFFER_R8`, sharpen 0, and an empty `model_path`. `MAGIC_BACKEND_DEFAULT` with a CPU buffer selects x86 or NEON.
 
 ```c
-#include "mc_enable.h"
-MC_Enable_SetModelDir("/path/to/MagicSRModels");  // or MC_Enable_SetModelPath(".../model.bin")
-void* output = MC_Enable(input, scale);           // use output
-MC_Disable(output);
+void *handle = NULL;
+mc_nscaler_input_frame_t in;
+mc_nscaler_output_frame_t out;
+
+memset(&in, 0, sizeof(in));
+memset(&out, 0, sizeof(out));
+in.handle.pointer = in_buf;   /* CPU buffer under the default ctrl */
+in.width = in_w;
+in.height = in_h;
+out.handle.pointer = out_buf;
+out.width = out_w;
+out.height = out_h;
+mc_nscaler_enable(&handle, &in, &out); /* creates, then processes */
+mc_nscaler_disable(handle);
 ```
 
-Unity / Unreal plugins follow the same flow as `SetModelDir` → `Enable(input, scale)` → `Disable()`.
+Call `mc_nscaler_control(..., MC_NSCALER_CMD_SET_PARAM, &ctrl, NULL)` when the defaults are not enough: a model file, a GPU backend, Balanced or temporal mode, or a sharpen level. `model_path` is the absolute path of `model/magic_sr_gpu_params.bin` (at most 255 characters). The library does not search the working directory. `model_path`, `backend`, and the depth/HDR flags stay fixed after creation.
+
+```c
+#include "mc_interface.h"
+#include <string.h>
+
+static void *g_handle;
+
+int sr_init(const char *model_path)
+{
+    ctrl_param_t ctrl;
+
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.input_type = INPUT_TEXTURE_RGB8Unorm;
+    strncpy(ctrl.model_path, model_path, sizeof(ctrl.model_path) - 1);
+    ctrl.scaler_factor = 2.0f;          /* spatial [1, 8]; temporal (1, 8] */
+    ctrl.alg_mode = SPATIAL_BALANCED_MODE; /* 0 speed, 1 balanced, 2/3 temporal */
+    ctrl.backend = MAGIC_BACKEND_METAL;
+    ctrl.log_level = MAGIC_LOG_ERROR;
+    ctrl.spatial_sharpen_level = 0;      /* 0..5 */
+    g_handle = NULL;
+    return mc_nscaler_control(&g_handle, MC_NSCALER_CMD_SET_PARAM, &ctrl, NULL);
+}
+
+int sr_process(void *in_tex, void *out_tex,
+               unsigned in_w, unsigned in_h,
+               unsigned out_w, unsigned out_h,
+               uint32_t pixel_format)
+{
+    mc_nscaler_input_frame_t in;
+    mc_nscaler_output_frame_t out;
+
+    memset(&in, 0, sizeof(in));
+    memset(&out, 0, sizeof(out));
+    in.handle.pointer = in_tex;          /* MTLTexture* */
+    in.format = pixel_format;
+    in.width = in_w;
+    in.height = in_h;
+    out.handle.pointer = out_tex;
+    out.format = pixel_format;
+    out.width = out_w;
+    out.height = out_h;
+    return mc_nscaler_enable(&g_handle, &in, &out);
+}
+
+void sr_shutdown(void)
+{
+    mc_nscaler_disable(g_handle);
+    g_handle = NULL;
+}
+```
+
+The same three calls cover every backend. Zero-initialize each struct, then write the live handle member for the backend chosen at create time:
+
+| Backend | Color handle |
+| --- | --- |
+| Metal, D3D11 | `handle.pointer` (`MTLTexture*` or `ID3D11Texture2D*`) |
+| Vulkan | `handle.vk_image` (`VkImage` as `uint64_t`), plus `format` and `layout` |
+| OpenGL / OpenGLES | `handle.gl_texture` (`GLuint`; `target` 0 means `GL_TEXTURE_2D`) |
+| x86 / NEON | `handle.pointer` (CPU buffer) |
+
+The first `mc_nscaler_enable` needs a non-zero input size in `[64, 4032]`. Output width and height of `0, 0` use the size from `scaler_factor`.
+
+Temporal modes (`TEMPORAL_SPEED_MODE`, `TEMPORAL_BALANCED_MODE`) use this same handle. Each `enable` also sets `in.frame` to a `temporal_frame_t` with `struct_size = sizeof(temporal_frame_t)`, and fills depth, motion, jitter, and camera fields. Vulkan records into the caller's already-recording command buffer and does not submit it.
 
 <a href="README.assets/MagicSR_Quick_Integration.mp4">
   <img src="README.assets/MagicSR_Quick_Integration.gif" width="880" alt="MagicSR quick integration tutorial">
