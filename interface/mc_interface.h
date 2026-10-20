@@ -50,10 +50,10 @@ typedef enum alg_mode_e {
                               * Metal/Vulkan/GLES Speed path, missing
                               * transparency) and apply depth+MV history
                               * rejection. Explicit caller masks win per
-                              * channel. FSR-family Speed (D3D11 / desktop GL)
+                              * channel. Magic-temporal-family Speed (D3D11 / desktop GL)
                               * does not derive transparency from color.a. */
     TEMPORAL_BALANCED_MODE = 3, /* temporal upscale in (1, 8]; spatial preprocess
-                                 * off. Canonical FSR-family path. Derives
+                                 * off. Canonical Magic-temporal-family path. Derives
                                  * missing reactive and applies depth+MV
                                  * history rejection. Explicit caller masks
                                  * win per channel. Missing transparency binds
@@ -221,7 +221,7 @@ typedef enum mc_depth_infinite_e {
 /**
  * @brief LDR vs HDR input color (create-stage, ctrl_param_t.hdr_color).
  * @details LDR: color is in a display-referred [0,1] range.
- *          HDR: color is HDR (not LDR [0,1]); FSR3 uses the HDR path.
+ *          HDR: color is HDR (not LDR [0,1]); MCTSR uses the HDR path.
  *          0 (unspecified) is the handle canonical default: LDR.
  *          Immutable for the handle lifetime.
  */
@@ -263,12 +263,12 @@ typedef enum mc_hdr_color_e {
  *            // local contrast, MV divergence, short persistence, and
  *            // color.a / opaque-only evidence. An explicit texture wins
  *            // that channel. A derived transparency is not a semantic
- *            // mask; FSR-family paths (Balanced on every backend; Speed on
+ *            // mask; Magic-temporal-family paths (Balanced on every backend; Speed on
  *            // D3D11 and desktop GL) bind an internal zero transparency
  *            // when omitted. Diagnostic kill switches:
  *            // MAGICSR_TAAU_AUTO_MASK=0 and MAGICSR_TAAU_HIST_REJECT=0.
  *
- *          Fixed input contract (all backends; same idea as FSR/DLSS/MetalFX):
+ *          Fixed input contract (all backends; same idea as MagicSR/DLSS/MetalFX):
  *            - Motion is current → previous: current pixel + decoded MV
  *              lands on the previous frame. The library never negates MVs.
  *            - Jitter and output coordinates are top-left, +X right, +Y down.
@@ -323,6 +323,11 @@ typedef struct temporal_frame_t {
      * size is not validated. The caller owns the resource for the frame.
      */
     magic_resource_t exposure_texture;
+    /*
+     * Optional: frames since the camera last moved (still-camera hint for TAAU).
+     * 0 when unknown or when struct_size does not cover this field.
+     */
+    float frames_since_camera_still;
 } temporal_frame_t;
 
 /** Byte size of the current prefix (fields through transparency). */
@@ -398,10 +403,9 @@ typedef struct ctrl_param_t {
     magic_backend_e backend;       // Runtime backend selector: x86/neon/metal/opengl/opengles/vulkan.
     unsigned int spatial_sharpen_level; // Spatial sharpen grade [0, 5]. 0 = off, 5 = strongest.
                                    // RCAS attenuation = (5-level)*0.2 when RCAS is used; 0 skips RCAS.
-                                   // SPATIAL_SPEED (1,2): 2dir LUT (segment 1+level) then bilinear.
+                                   // SPATIAL_SPEED (1,2): 2dir LUT (segment 1+level) then lanczos2HV.
                                    // SPATIAL_SPEED exact-2x / (2,8]: combined-bin segment 1+level.
-                                   // SPATIAL_BALANCED (1,2): 2dir LUT segment 1+level then lanczos2HV.
-                                   //   Sharpen picks the segment. No FSR1 RCAS on this band.
+                                   // SPATIAL_BALANCED (1,2): MCSP1 EASU+RCAS (level drives RCAS; no LUT segment).
                                    // SPATIAL_BALANCED exact-2x / (2,8]: lut_boost (8th combined-bin segment).
                                    // RCAS-G when level>0 (level sets RCAS attenuation; no extra LUT slot).
                                    // Exact 2x (all backends): lut_boost then RCAS-G at 2x
@@ -425,11 +429,14 @@ typedef struct ctrl_param_t {
      *   MC_DEPTH_INFINITE_YES permits camera_far=0 and requires camera_near>0.
      * hdr_color:
      *   MC_HDR_COLOR_LDR for display-referred [0,1] color.
-     *   MC_HDR_COLOR_HDR for HDR color (FSR3 HDR path).
+     *   MC_HDR_COLOR_HDR for HDR color (MCTSR HDR path).
      */
     uint32_t depth_reversed;       /* mc_depth_reversed_e */
     uint32_t depth_infinite;       /* mc_depth_infinite_e */
     uint32_t hdr_color;            /* mc_hdr_color_e */
+    /* Optional create-time input size for SET_PARAM handle creation; 0 = library default. */
+    unsigned int width;
+    unsigned int height;
 } ctrl_param_t;
 
 /**
@@ -541,6 +548,18 @@ int mc_nscaler_disable(void *handle);
  * @return Pointer to a static NUL-terminated version string; never NULL.
  */
 char *mc_nscaler_version(void);
+
+/**
+ * @brief Compile stamp for the loaded library. Stable pointer, never NULL.
+ *        Distinct from mc_nscaler_version: includes the build date and time.
+ */
+const char *mc_build_id(void);
+
+/**
+ * @brief UTF-8 path of the loaded libmagic_sr module (GetModuleFileName).
+ *        Writes an empty string when the path is unavailable.
+ */
+void mc_loaded_module_path(char *buf, int cap);
 
 /* Public error codes returned by MC_* APIs or exposed through output_status_params_t.error_code. */
 #define MC_ERROR_INIT_NULL_PARAM                  (-100001) /* Create received a NULL ctrl_param_t pointer. */
