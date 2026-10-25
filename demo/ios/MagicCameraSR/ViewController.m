@@ -55,7 +55,7 @@ static const NSTimeInterval kScaleApplyDelay = 0.08;
     self.view.backgroundColor = UIColor.blackColor;
     self.captureQueue = dispatch_queue_create("magic.magnifier.capture", DISPATCH_QUEUE_SERIAL);
     self.device = MTLCreateSystemDefaultDevice();
-    self.selectedMode = SPATIAL_SPEED_MODE;
+    self.selectedMode = SR_SPEED_MODE_FOR_IMAGE;
     self.selectedScale = 2.0f;
     self.srHandle = NULL;
     self.fullFrameWidth = 0;
@@ -237,7 +237,7 @@ static const NSTimeInterval kScaleApplyDelay = 0.08;
 }
 
 - (void)modeChanged:(UISegmentedControl *)sender {
-    self.selectedMode = sender.selectedSegmentIndex == 1 ? SPATIAL_BALANCED_MODE : SPATIAL_SPEED_MODE;
+    self.selectedMode = sender.selectedSegmentIndex == 1 ? SR_BALANCED_MODE_FOR_IMAGE : SR_SPEED_MODE_FOR_IMAGE;
     [self restartEngine];
 }
 
@@ -428,7 +428,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         outFrame.height = (unsigned int)outH;
 
         void *h = self.srHandle;
-        int ret = mc_nscaler_enable(&h, &inFrame, &outFrame);
+        mc_nscaler_input_frame_t *in2_l431[2] = { &inFrame, NULL };
+                int ret = mc_nscaler_enable(&h, in2_l431, &outFrame);
         self.srHandle = h;
         if (ret != 0) {
             @throw [NSException exceptionWithName:@"MCProcessError"
@@ -454,7 +455,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         UIImage *img = [self imageFromRgbaData:self.outputRgbaData width:outW height:outH];
         NSString *status = [NSString stringWithFormat:@"ver=%s mode=%@ scale=x%@ crop=%zux%zu out=%zux%zu",
                             mc_nscaler_version(),
-                            self.selectedMode == SPATIAL_BALANCED_MODE ? @"balanced" : @"speed",
+                            self.selectedMode == SR_BALANCED_MODE_FOR_IMAGE ? @"balanced" : @"speed",
                             [self formatScale:self.selectedScale],
                             cropW, cropH, outW, outH];
         dispatch_async(dispatch_get_main_queue(), ^{

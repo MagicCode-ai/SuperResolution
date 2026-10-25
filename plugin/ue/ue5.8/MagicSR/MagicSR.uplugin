@@ -1,0 +1,24 @@
+{
+  "FileVersion": 3,
+  "Version": 3,
+  "VersionName": "3.0.0",
+  "FriendlyName": "MagicSR",
+  "Description": "MagicSR image/graphic super-resolution bridge (mc_nscaler_*). Linux Vulkan graphic + Windows D3D11/Vulkan.",
+  "Category": "Rendering",
+  "CreatedBy": "MagicSR Plugin",
+  "CanContainContent": false,
+  "IsBetaVersion": true,
+  "Modules": [
+    {
+      "Name": "MagicSR",
+      "Type": "Runtime",
+      "LoadingPhase": "PostConfigInit",
+      "PlatformAllowList": [
+        "Linux",
+        "Win64",
+        "Android",
+        "IOS"
+      ]
+    }
+  ]
+}

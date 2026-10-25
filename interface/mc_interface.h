@@ -19,8 +19,8 @@
  *              initialization, image processing, parameter control, resource release,
  *              and version query.
  * @author      MagicCode  Team
- * @date        2026-08-28
- * @version     V2.0.0
+ * @date        2026-10-20
+ * @version     V3.0.0
  * @copyright   Copyright (C) 2024-2026 MagicCode Technology Co., Ltd. All rights reserved.
  * @website     https://www.magiccode-ai.com
  ************************************************************************************/
@@ -43,24 +43,40 @@ typedef enum input_type_e {
 } input_type_e;
 
 typedef enum alg_mode_e {
-    SPATIAL_SPEED_MODE = 0,
-    SPATIAL_BALANCED_MODE = 1,
-    TEMPORAL_SPEED_MODE = 2, /* temporal upscale in (1, 8]; spatial preprocess off.
+    SR_SPEED_MODE_FOR_IMAGE = 0,
+    SR_BALANCED_MODE_FOR_IMAGE = 1,
+    SR_SPEED_MODE_FOR_GRAPHIC = 2, /* temporal upscale in (1, 8]; spatial preprocess off.
                               * Default: derive missing reactive (and, on the
                               * Metal/Vulkan/GLES Speed path, missing
                               * transparency) and apply depth+MV history
                               * rejection. Explicit caller masks win per
                               * channel. Magic-temporal-family Speed (D3D11 / desktop GL)
                               * does not derive transparency from color.a. */
-    TEMPORAL_BALANCED_MODE = 3, /* temporal upscale in (1, 8]; spatial preprocess
+    SR_BALANCED_MODE_FOR_GRAPHIC = 3, /* temporal upscale in (1, 8]; spatial preprocess
                                  * off. Canonical Magic-temporal-family path. Derives
                                  * missing reactive and applies depth+MV
                                  * history rejection. Explicit caller masks
                                  * win per channel. Missing transparency binds
                                  * an internal zero texture; it is not a
                                  * semantic mask. */
-    MAX_ALG_MODE
+    GEN_SPEED_MODE_FOR_GRAPHIC = 1 << 2, /* =4. FG-Fast (analytic, no weights).
+                              * Vulkan + MAGIC_SR_HAS_FG only. Alone this equals
+                              * SR_SPEED_MODE_FOR_IMAGE|GEN_SPEED_MODE_FOR_GRAPHIC
+                              * because SR_SPEED_MODE_FOR_IMAGE is 0. */
+    GEN_BALANCED_MODE_FOR_GRAPHIC = 1 << 3, /* =8. FG-CoreV3 (model_path = FG
+                              * weight file; empty = default search).
+                              * Vulkan + MAGIC_SR_HAS_FG only. */
+    /* Explicit 16: without it the next implicit value would be 9, so
+     * (alg_mode_e)MAX_ALG_MODE would look like a legal
+     * SR_BALANCED_MODE_FOR_IMAGE|GEN_SPEED_MODE_FOR_GRAPHIC combo. */
+    MAX_ALG_MODE = 16
 } alg_mode_e;
+
+#define MC_ALG_SR_MASK  0x3
+#define MC_ALG_GEN_MASK 0xC
+#define MC_ALG_SR_OF(m)  ((m) & MC_ALG_SR_MASK)
+#define MC_ALG_GEN_OF(m) ((m) & MC_ALG_GEN_MASK)
+#define MC_ALG_HAS_GEN(m) (MC_ALG_GEN_OF(m) != 0)
 
 /*
  * Backend-neutral I/O resource. Color, output, depth, motion, reactive, and
@@ -328,6 +344,21 @@ typedef struct temporal_frame_t {
      * 0 when unknown or when struct_size does not cover this field.
      */
     float frames_since_camera_still;
+    /*
+     * Optional unjittered ViewProjection for FG-Fast (column-major 4x4).
+     * Clip space matches Fast pre.comp: NDC xy in [-1,1], z in [-1,1]
+     * (OpenGL; near = -1), UV = clip.xy/w * 0.5 + 0.5. Depth bound on this
+     * frame is GPU device depth in [0,1] with 0 = near (same temporal_frame_t
+     * contract; CopyDepth 1-Z on UE reversed-Z).
+     *
+     * I0 fills vp0, I1 fills vp1. Either frame may carry the pair. GEN reads
+     * with MC_TEMPORAL_FRAME_HAS_FIELD; have_view_projection != 0 means the
+     * matrices on that frame are valid. Missing field or 0 keeps Fast
+     * have_matrices=0 (MV-only, old behavior). Not a control command.
+     */
+    float vp0[16];
+    float vp1[16];
+    uint32_t have_view_projection;
 } temporal_frame_t;
 
 /** Byte size of the current prefix (fields through transparency). */
@@ -343,7 +374,7 @@ typedef struct temporal_frame_t {
 /**
  * @brief Per-frame input color (and temporal extras).
  * @details Spatial modes may leave frame NULL. Temporal modes
- *          (TEMPORAL_SPEED_MODE, TEMPORAL_BALANCED_MODE) require
+ *          (SR_SPEED_MODE_FOR_GRAPHIC, SR_BALANCED_MODE_FOR_GRAPHIC) require
  *          frame != NULL. command_buffer is one-shot per frame
  *          (VkCommandBuffer / MTLCommandBuffer). NULL is valid where the
  *          backend submits internally (CPU, spatial GPU, Metal default,
@@ -353,6 +384,15 @@ typedef struct temporal_frame_t {
  *          width/height are the input pixel size [64, 4032]. First
  *          mc_nscaler_enable must supply a valid size; later calls use these
  *          to resize. 0,0 on a subsequent enable keeps the handle size.
+ *
+ *          GEN (Vulkan): in_frame[0]/[1] are I0/I1 hudless color at OUTPUT
+ *          resolution. handle/format/layout/width/height are the Vulkan image
+ *          (VkImage, VkFormat, entry VkImageLayout, extent). command_buffer
+ *          on in_frame[0] is the recording VkCommandBuffer (same contract as
+ *          Vulkan Temporal: no submit, no wait). Depth/motion stay on
+ *          temporal_frame_t at render resolution. reset_history,
+ *          frames_since_camera_still, and motion_vector_scale map to the
+ *          internal FG path; callers do not pass FG-only structs.
  */
 struct mc_nscaler_input_frame_t {
     magic_data_e handle;
@@ -371,6 +411,8 @@ struct mc_nscaler_input_frame_t {
  * @details width/height are the destination pixel size. 0,0 means the
  *          library output size from scaler_factor. When both are set they
  *          must match the handle output size after scaling.
+ *          GEN (Vulkan): handle/format/layout/width/height are the generated
+ *          It image at OUTPUT resolution (VkImage, VkFormat, entry layout).
  */
 struct mc_nscaler_output_frame_t {
     magic_data_e handle;
@@ -396,9 +438,11 @@ struct mc_nscaler_output_frame_t {
 
 typedef struct ctrl_param_t {
     input_type_e input_type; //0 = buffer, 1 = r8_texture
-    char model_path[256];          // File path of the pre-trained model (max 255 characters + null terminator)
+    char model_path[256];          // SR: pre-trained model path (max 255 + NUL).
+                                   // GEN: FG weight file; empty = MAGIC_FG_WEIGHT_PATH /
+                                   // magic_fg_core.bin / model/magic_fg_core.bin.
     float scaler_factor;           // Requested super-resolution scaling factor. Spatial: [1, 8]. Temporal: (1, 8]. x86/neon accept implemented integer scales only.
-    alg_mode_e alg_mode;         // 0 = SPATIAL_SPEED_MODE, 1 = SPATIAL_BALANCED_MODE, 2 = TEMPORAL_SPEED_MODE, 3 = TEMPORAL_BALANCED_MODE.
+    alg_mode_e alg_mode;         // SR bits 0..3; optional GEN_SPEED=4 or GEN_BALANCED=8 (not both). MAX_ALG_MODE=16.
     log_level_e log_level;
     magic_backend_e backend;       // Runtime backend selector: x86/neon/metal/opengl/opengles/vulkan.
     unsigned int spatial_sharpen_level; // Spatial sharpen grade [0, 5]. 0 = off, 5 = strongest.
@@ -455,7 +499,7 @@ typedef struct output_status_params_t {
     magic_backend_e backend;
     unsigned int num_threads;      // Current number of CPU threads in use
     unsigned int spatial_sharpen_level; // Spatial sharpen grade [0, 5]. 0 = off, 5 = strongest.
-    double gpu_time;
+    double gpu_time;               /* last GPU time (seconds); GEN uses SR+FG where measured */
     unsigned int error_code;       // Algorithm error code: 0 = No error, non-zero = specific error (refer to error code specification)
     /*
      * Last successful temporal mc_nscaler_enable snapshot.
@@ -504,19 +548,42 @@ typedef enum mc_cmd_e {
 /**
  * @brief Create (if *handle == NULL) and/or process one frame.
  * @param handle Address of the algorithm handle. *handle == NULL is create
- *        using in_frame width/height and default ctrl (empty model_path,
- *        scaler 2, SPATIAL_SPEED). Prefer SET_PARAM create when ctrl is needed.
- *        *handle != NULL validates integrity then processes.
- *        in_frame width/height [64, 4032] resize the handle when both are
+ *        using in_frame[0] width/height and default ctrl (empty model_path,
+ *        scaler 2, SR_SPEED_MODE_FOR_IMAGE). Prefer SET_PARAM create when
+ *        ctrl is needed. *handle != NULL validates integrity then processes.
+ *        in_frame[0] width/height [64, 4032] resize the handle when both are
  *        non-zero; 0,0 keeps the current size.
- * @param in_frame Input color. NULL with a live handle skips process.
- *        Create requires a non-NULL in_frame with a valid size.
+ * @param in_frame Pointer to two input-frame pointers.
+ *        in_frame[0] is the color frame before the interpolate position
+ *        (and the only input in non-GEN modes). NULL in_frame, or
+ *        in_frame[0] == NULL, matches the old in_frame == NULL contract
+ *        (MC_ERROR_PROCESS_NULL_IMAGE on create; skip process on a live handle).
+ *        Create requires in_frame[0] with a valid size.
  *        Spatial may leave frame NULL; temporal requires frame != NULL.
+ *        in_frame[1] is the color frame after the interpolate position.
+ *        It is read only when a GEN_* alg_mode is selected; other modes
+ *        ignore it (must not be read; may be NULL or a garbage pointer).
+ *
+ *        GEN (Vulkan only, library built with MAGIC_SR_HAS_FG):
+ *          in_frame[1] == NULL → existing SR path (in_frame[0] is the input).
+ *          in_frame[1] != NULL → interpolate t=0.5 between [0] and [1] into
+ *            out_frame. Color of [0]/[1]/out is OUTPUT resolution (post-SR).
+ *            Depth and motion stay at render (input) resolution; FG samples
+ *            them with normalized UV so the library does not copy/stretch.
+ *          GEN_SPEED → FG-Fast (analytic, no weights). GEN_BALANCED →
+ *            FG-CoreV3 (ctrl_param_t.model_path is the FG weight file;
+ *            empty uses MAGIC_FG_WEIGHT_PATH / magic_fg_core.bin /
+ *            model/magic_fg_core.bin).
+ *          Vulkan GEN records into in_frame[0].command_buffer, same contract
+ *            as Vulkan Temporal (no submit, no wait). NULL command_buffer
+ *            returns MC_ERROR_TEMPORAL_COMMAND_BUFFER.
+ *          Other backends / builds without FG still return
+ *            MC_ERROR_INIT_ALG_MODE_GEN_NOT_AVAILABLE (-100050) at create.
  * @param out_frame Output color. width/height 0,0 use the handle output size.
  *        Process runs only when both in and out native handles are present.
  * @return 0 on success; negative MC_ERROR_* on failure.
  */
-int mc_nscaler_enable(void **handle, mc_nscaler_input_frame_t *in_frame,
+int mc_nscaler_enable(void **handle, mc_nscaler_input_frame_t *in_frame[2],
                       mc_nscaler_output_frame_t *out_frame);
 
 /**
@@ -546,151 +613,12 @@ int mc_nscaler_disable(void *handle);
 /**
  * @brief Get the version string of the algorithm library.
  * @return Pointer to a static NUL-terminated version string; never NULL.
+ *         The bytes live in this module; copy them before FreeLibrary/dlclose.
  */
 char *mc_nscaler_version(void);
 
-/**
- * @brief Compile stamp for the loaded library. Stable pointer, never NULL.
- *        Distinct from mc_nscaler_version: includes the build date and time.
- */
-const char *mc_build_id(void);
-
-/**
- * @brief UTF-8 path of the loaded libmagic_sr module (GetModuleFileName).
- *        Writes an empty string when the path is unavailable.
- */
-void mc_loaded_module_path(char *buf, int cap);
-
-/* Public error codes returned by MC_* APIs or exposed through output_status_params_t.error_code. */
-#define MC_ERROR_INIT_NULL_PARAM                  (-100001) /* Create received a NULL ctrl_param_t pointer. */
-#define MC_ERROR_INIT_WIDTH_OUT_OF_RANGE          (-100002) /* Initialization width is outside the supported range. */
-#define MC_ERROR_INIT_HEIGHT_OUT_OF_RANGE         (-100003) /* Initialization height is outside the supported range. */
-#define MC_ERROR_INIT_SCALER_OUT_OF_RANGE         (-100004) /* Initialization scaler factor is outside the supported range. */
-#define MC_ERROR_INIT_ALG_MODE_OUT_OF_RANGE       (-100005) /* Initialization algorithm mode is invalid. */
-#define MC_ERROR_INIT_INPUT_TYPE_OUT_OF_RANGE     (-100006) /* Initialization input type is invalid. */
-#define MC_ERROR_INIT_BACKEND_OUT_OF_RANGE        (-100007) /* Initialization backend enum value is invalid. */
-#define MC_ERROR_INIT_BACKEND_UNAVAILABLE         (-100008) /* Requested backend is not available in this build. */
-#define MC_ERROR_INIT_CPU_BACKEND_INPUT_TYPE      (-100009) /* CPU backend was requested with non-buffer input. */
-#define MC_ERROR_INIT_GPU_BACKEND_INPUT_TYPE      (-100010) /* GPU backend was requested with buffer input. */
-#define MC_ERROR_INIT_MODEL_PATH_TOO_LONG         (-100011) /* Model path exceeds the supported length. */
-#define MC_ERROR_INIT_LOAD_PARAMS_FAILED          (-100012) /* Model parameters could not be loaded. */
-#define MC_ERROR_INIT_TYPE_SIZE_MISMATCH          (-100013) /* Model primary data type size does not match the backend. */
-#define MC_ERROR_INIT_SPEED_TYPE_MISMATCH    (-100014) /* Speed model secondary data type size is invalid. */
-#define MC_ERROR_INIT_BALANCED_TYPE_MISMATCH         (-100015) /* Balanced model secondary data type size is invalid. */
-#define MC_ERROR_INIT_QUANT_SCALER_INVALID        (-100016) /* Quantization scaler is incompatible with the current build. */
-#define MC_ERROR_INIT_STORE_MODE_INVALID          (-100017) /* Model store mode is incompatible with data type sizes. */
-#define MC_ERROR_INIT_NEON_QUANT_SHIFT_MISMATCH   (-100018) /* NEON speed mode quantization shift is unsupported. */
-#define MC_ERROR_INIT_CPU_FEATURE_UNSUPPORTED     (-100019) /* Required CPU feature is not available at runtime. */
-#define MC_ERROR_INIT_FUNC_UNSUPPORTED_SCALER     (-100020) /* No processing function exists for the selected scaler. */
-#define MC_ERROR_INIT_FUNC_ASSIGN_FAILED          (-100021) /* Processing function assignment failed. */
-#define MC_ERROR_INIT_THREAD_START_SEM_FAILED     (-100022) /* Worker thread start semaphore initialization failed. */
-#define MC_ERROR_INIT_THREAD_DONE_SEM_FAILED      (-100023) /* Worker thread completion semaphore initialization failed. */
-#define MC_ERROR_INIT_THREAD_CREATE_FAILED        (-100024) /* Worker thread creation failed. */
-#define MC_ERROR_INIT_GPU_CREATE_FAILED           (-100025) /* GPU backend context creation failed. */
-#define MC_ERROR_INIT_REPORT_THREAD_LOCK_FAILED   (-100026) /* Report thread mutex initialization failed. */
-#define MC_ERROR_INIT_REPORT_THREAD_SEM_FAILED    (-100027) /* Report thread semaphore initialization failed. */
-#define MC_ERROR_INIT_REPORT_THREAD_CREATE_FAILED (-100028) /* Report thread creation failed. */
-#define MC_ERROR_INIT_MODEL_FILE_OPEN_FAILED      (-100029) /* Model file could not be opened. */
-#define MC_ERROR_INIT_MODEL_READ_TAG_FAILED       (-100030) /* Failed to read model backend tag. */
-#define MC_ERROR_INIT_MODEL_READ_TYPE_SIZE_FAILED (-100031) /* Failed to read model primary data type size. */
-#define MC_ERROR_INIT_MODEL_READ_TYPE2_SIZE_FAILED (-100032) /* Failed to read model secondary data type size. */
-#define MC_ERROR_INIT_MODEL_READ_QUANT_FAILED     (-100033) /* Failed to read model quantization factor. */
-#define MC_ERROR_INIT_MODEL_READ_DIM_FAILED       (-100034) /* Failed to read model LUT dimension. */
-#define MC_ERROR_INIT_MODEL_READ_LUT_NUMS_FAILED  (-100035) /* Failed to read model LUT count. */
-#define MC_ERROR_INIT_MODEL_READ_LUT_LEN_FAILED   (-100036) /* Failed to read model primary LUT length. */
-#define MC_ERROR_INIT_MODEL_READ_LUT2_LEN_FAILED  (-100037) /* Failed to read model secondary LUT length. */
-#define MC_ERROR_INIT_MODEL_READ_SCALER_FAILED    (-100038) /* Failed to read model scaler factor. */
-#define MC_ERROR_INIT_MODEL_READ_STORE_MODE_FAILED (-100039) /* Failed to read model store mode. */
-#define MC_ERROR_INIT_MODEL_READ_TAB_SIZE_FAILED  (-100040) /* Failed to read fast x2 model table size. */
-#define MC_ERROR_INIT_MODEL_TAB_SIZE_INVALID      (-100041) /* Fast x2 model table size is invalid. */
-#define MC_ERROR_INIT_MODEL_TAG_INVALID           (-100042) /* Model backend tag is invalid. */
-#define MC_ERROR_INIT_MODEL_LUT_NUMS_INVALID      (-100043) /* Model LUT count is unsupported. */
-#define MC_ERROR_INIT_MODEL_SCALER_MISMATCH       (-100044) /* Model scaler factor does not match requested scaler. */
-#define MC_ERROR_INIT_MODEL_STORE_MODE_INVALID    (-100045) /* Model store mode value is unsupported. */
-#define MC_ERROR_INIT_MODEL_DATA_SHORT_READ       (-100046) /* Model payload is shorter than expected. */
-#define MC_ERROR_INIT_MODEL_TAIL_INVALID          (-100047) /* Model tail marker is invalid. */
-#define MC_ERROR_INIT_SHARPEN_LEVEL_OUT_OF_RANGE  (-100048) /* spatial_sharpen_level is outside [0, 5]. */
-#define MC_ERROR_INIT_STRUCT_SIZE                 (-100049) /* Reserved. */
-#define MC_ERROR_MEMORY_INIT_PARAMS_ALLOC_FAILED  (-200001) /* Memory allocation failed while parsing model parameters. */
-#define MC_ERROR_MEMORY_INIT_REINIT_ALLOC_FAILED  (-200002) /* Memory allocation failed during reinitialization. */
-#define MC_ERROR_MEMORY_INIT_THREAD_ALLOC_FAILED  (-200003) /* Memory allocation failed during thread pool initialization. */
-#define MC_ERROR_MEMORY_INIT_FAST_X2_MODEL_ALLOC_FAILED (-200004) /* Memory allocation failed for fast x2 model data. */
-#define MC_ERROR_MEMORY_INIT_MODEL_DATA_ALLOC_FAILED (-200005) /* Memory allocation failed for model payload data. */
-
-#define MC_ERROR_PROCESS_NULL_HANDLE              (-101001) /* mc_nscaler_enable received a NULL handle. */
-#define MC_ERROR_PROCESS_HANDLE_CORRUPTED         (-101002) /* mc_nscaler_enable detected an invalid handle guard value. */
-#define MC_ERROR_PROCESS_NULL_IMAGE               (-101003) /* mc_nscaler_enable received a NULL input or output image. */
-#define MC_ERROR_PROCESS_CPU_FUNC_MISSING         (-101004) /* CPU processing function pointers are not initialized. */
-#define MC_ERROR_PROCESS_TEXTURE_TYPE_INVALID     (-101005) /* Texture input or output pointer is invalid. */
-#define MC_ERROR_PROCESS_TEXTURE_TYPE_CONFLICT    (-101006) /* Texture type conflicts with the configured input type. */
-#define MC_ERROR_PROCESS_GPU_SR_FAILED            (-101007) /* GPU super-resolution stage failed. */
-#define MC_ERROR_PROCESS_GPU_RESIZE_FAILED        (-101008) /* GPU resize/post-filter stage failed. */
-#define MC_ERROR_PROCESS_GPU_POST_FAILED          (-101009) /* GPU post/upscale stage failed. */
-
-#define MC_ERROR_ENABLE_NULL_HANDLE               MC_ERROR_PROCESS_NULL_HANDLE
-#define MC_ERROR_ENABLE_HANDLE_CORRUPTED          MC_ERROR_PROCESS_HANDLE_CORRUPTED
-#define MC_ERROR_ENABLE_NULL_IMAGE                MC_ERROR_PROCESS_NULL_IMAGE
-#define MC_ERROR_ENABLE_CPU_FUNC_MISSING          MC_ERROR_PROCESS_CPU_FUNC_MISSING
-#define MC_ERROR_ENABLE_TEXTURE_TYPE_INVALID      MC_ERROR_PROCESS_TEXTURE_TYPE_INVALID
-#define MC_ERROR_ENABLE_TEXTURE_TYPE_CONFLICT     MC_ERROR_PROCESS_TEXTURE_TYPE_CONFLICT
-#define MC_ERROR_ENABLE_GPU_SR_FAILED             MC_ERROR_PROCESS_GPU_SR_FAILED
-#define MC_ERROR_ENABLE_GPU_RESIZE_FAILED         MC_ERROR_PROCESS_GPU_RESIZE_FAILED
-#define MC_ERROR_ENABLE_GPU_POST_FAILED           MC_ERROR_PROCESS_GPU_POST_FAILED
-
-#define MC_ERROR_TEMPORAL_NULL_FRAME              (-105001) /* Nested temporal_frame_t pointer is NULL. */
-#define MC_ERROR_TEMPORAL_STRUCT_SIZE             (-105002) /* temporal_frame_t.struct_size is below the required prefix. */
-#define MC_ERROR_TEMPORAL_MISSING_COLOR           (-105003) /* Color (image_in) native handle is missing. */
-#define MC_ERROR_TEMPORAL_MISSING_OUTPUT          (-105004) /* Output (image_out) native handle is missing. */
-#define MC_ERROR_TEMPORAL_MISSING_DEPTH           (-105005) /* Depth native handle is missing. */
-#define MC_ERROR_TEMPORAL_MISSING_MOTION          (-105006) /* Motion-vector native handle is missing. */
-#define MC_ERROR_TEMPORAL_NONFINITE               (-105007) /* jitter, scale, near/far, pre_exposure, or frame time is NaN/Inf. */
-#define MC_ERROR_TEMPORAL_CAMERA_NEAR_FAR         (-105008) /* camera_near / camera_far relationship is invalid. */
-#define MC_ERROR_TEMPORAL_MV_DIRECTION            (-105009) /* Reserved; motion is always current→previous. */
-#define MC_ERROR_TEMPORAL_MV_UNITS                (-105010) /* Reserved; scale is the only MV numeric conversion. */
-#define MC_ERROR_TEMPORAL_MV_SCALE                (-105011) /* motion_vector_scale is mixed-zero or otherwise invalid. */
-#define MC_ERROR_TEMPORAL_COORD_SPACE             (-105012) /* Reserved; coordinates are top-left, +X right, +Y down. */
-#define MC_ERROR_TEMPORAL_DEPTH_ENCODING          (-105013) /* Reserved; depth is GPU device depth [0,1]. */
-#define MC_ERROR_TEMPORAL_METADATA_CONFLICT       (-105014) /* Tail semantics disagree with temporal flags. */
-#define MC_ERROR_TEMPORAL_FORMAT                  (-105015) /* Caller-provided format is not accepted for this slot. */
-#define MC_ERROR_TEMPORAL_COMMAND_BUFFER          (-105017) /* Vulkan temporal requires a recording command buffer. */
-
-#define MC_WARNING_TEMPORAL_FRAME_INDEX           (105001) /* frame_index is not last+1; history may be stale. */
-
-#define MC_ERROR_CONTROL_NULL_HANDLE              (-102001) /* mc_nscaler_control received a NULL handle. */
-#define MC_ERROR_CONTROL_HANDLE_CORRUPTED         (-102002) /* mc_nscaler_control detected an invalid handle guard value. */
-#define MC_ERROR_CONTROL_CMD_OUT_OF_RANGE         (-102003) /* Control command is outside the supported range. */
-#define MC_ERROR_CONTROL_NULL_PARAMS              (-102004) /* SET_PARAM received a NULL ctrl_param_t pointer. */
-#define MC_ERROR_CONTROL_WIDTH_OUT_OF_RANGE       (-102005) /* Control width is outside the supported range. */
-#define MC_ERROR_CONTROL_HEIGHT_OUT_OF_RANGE      (-102006) /* Control height is outside the supported range. */
-#define MC_ERROR_CONTROL_SCALER_OUT_OF_RANGE      (-102007) /* Control scaler factor is outside the supported range. */
-#define MC_ERROR_CONTROL_ALG_MODE_OUT_OF_RANGE    (-102008) /* Control algorithm mode is invalid. */
-#define MC_ERROR_CONTROL_MODEL_PATH_TOO_LONG      (-102009) /* Control model path exceeds the supported length. */
-#define MC_ERROR_CONTROL_INIT_FUNCS_FAILED        (-102010) /* Processing function re-assignment failed during control. */
-#define MC_ERROR_CONTROL_REINIT_FAILED            (-102011) /* Full reinitialization failed during control. */
-#define MC_ERROR_CONTROL_NULL_OUTPUT              (-102012) /* QUERY_STATUS command received a NULL output pointer. */
-#define MC_ERROR_MEMORY_CONTROL_ALLOC_FAILED      (-202001) /* Memory allocation failed during control. */
-
-#define MC_ERROR_UNINIT_NULL_HANDLE               (-103001) /* mc_nscaler_disable received a NULL handle. */
-#define MC_ERROR_UNINIT_HANDLE_CORRUPTED          (-103002) /* mc_nscaler_disable detected an invalid handle guard value. */
-
-#define MC_ERROR_DISABLE_NULL_HANDLE              MC_ERROR_UNINIT_NULL_HANDLE
-#define MC_ERROR_DISABLE_HANDLE_CORRUPTED         MC_ERROR_UNINIT_HANDLE_CORRUPTED
-#define MC_ERROR_MEMORY_UNINIT_DOUBLE_FREE        (-203001) /* Memory release count indicates a double free. */
-
-#define MC_ERROR_REPORT_INVALID_PARAM                (-104001) /* Report packet arguments are invalid. */
-#define MC_ERROR_REPORT_INVALID_SERVER_IP            (-104002) /* Report server IP address is invalid. */
-#define MC_ERROR_REPORT_SOCKET_ENV_INIT_FAILED       (-104003) /* Socket environment initialization failed. */
-#define MC_ERROR_REPORT_SOCKET_CREATE_FAILED         (-104004) /* Report socket creation failed. */
-#define MC_ERROR_REPORT_SOCKET_REUSEADDR_FAILED      (-104005) /* Setting SO_REUSEADDR on the report socket failed. */
-#define MC_ERROR_REPORT_SOCKET_SEND_TIMEOUT_FAILED   (-104006) /* Setting report socket send timeout failed. */
-#define MC_ERROR_REPORT_SOCKET_RECV_TIMEOUT_FAILED   (-104007) /* Setting report socket receive timeout failed. */
-#define MC_ERROR_REPORT_CONNECT_FAILED               (-104008) /* Connecting to the report server failed. */
-#define MC_ERROR_REPORT_SEND_FAILED                  (-104009) /* Sending the report packet failed. */
-#define MC_ERROR_REPORT_PARTIAL_SEND                 (-104010) /* Report packet was only partially sent. */
-
-#define MC_WARNING_MEMORY_LEAK_ON_FREE            (100001) /* Memory leak detected while freeing an internal handle. */
-#define MC_WARNING_MEMORY_LEAK_ON_UNINIT          (100002) /* Memory leak detected while uninitializing the API handle. */
-
+/* Public error/warning codes: appendix in mc_error.h (included here so callers that only include mc_interface.h keep compiling). */
+#include "mc_error.h"
 
 #ifdef __cplusplus
 }

@@ -1,0 +1,21 @@
+// Copy device depth (.r) from SceneDepth to R32F for MagicSR.
+// FScreenVertexShaderVS on desktop does not write TEXCOORD0; rebuild UV from SV_Position.
+
+#include "/Engine/Public/Platform.ush"
+
+Texture2D SceneDepthTexture;
+SamplerState SceneDepthSampler;
+float4 DepthUVMinMax;
+float2 OutputSize;
+
+void MainPS(
+    in float4 SvPosition : SV_POSITION,
+    out float4 OutColor : SV_Target0)
+{
+	float2 DestUV = (SvPosition.xy + 0.5) / max(OutputSize, float2(1.0, 1.0));
+	float2 SampleUV = lerp(DepthUVMinMax.xy, DepthUVMinMax.zw, DestUV);
+	float DeviceZ = SceneDepthTexture.SampleLevel(SceneDepthSampler, SampleUV, 0).r;
+	// UE perspective device Z is reversed (1 = near, 0 = far). The Vulkan temporal
+	// convert pass dilates with min() and treats 0 as near, so store 1-Z.
+	OutColor = float4(1.0 - DeviceZ, 0.0, 0.0, 0.0);
+}

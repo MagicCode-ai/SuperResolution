@@ -36,7 +36,7 @@ enum {
 static void *g_sr_handle = nullptr;
 static magic_backend_e g_backend = MAGIC_BACKEND_OPENGLES;
 static float g_scale = 2.0f;
-static alg_mode_e g_mode = SPATIAL_SPEED_MODE;
+static alg_mode_e g_mode = SR_SPEED_MODE_FOR_IMAGE;
 static unsigned int g_session_in_w = 0;
 static unsigned int g_session_in_h = 0;
 static unsigned int g_session_out_w = 0;
@@ -332,7 +332,7 @@ Java_com_example_superresolution_natives_SuperResolutionLib_initSuperResolution(
         return 0;
     }
     g_scale = scaler_factor;
-    g_mode = (sr_mode == (jint)SPATIAL_BALANCED_MODE) ? SPATIAL_BALANCED_MODE : SPATIAL_SPEED_MODE;
+    g_mode = (sr_mode == (jint)SR_BALANCED_MODE_FOR_IMAGE) ? SR_BALANCED_MODE_FOR_IMAGE : SR_SPEED_MODE_FOR_IMAGE;
 
     if (!create_gles_context()) {
         LOGE("gles context create failed");
@@ -441,7 +441,8 @@ Java_com_example_superresolution_natives_SuperResolutionLib_processImage(
     out_frame.width = (unsigned)output_width;
     out_frame.height = (unsigned)output_height;
 
-    int ret = mc_nscaler_enable(&g_sr_handle, &in_frame, &out_frame);
+    mc_nscaler_input_frame_t *in2_l444[2] = { &in_frame, NULL };
+        int ret = mc_nscaler_enable(&g_sr_handle, in2_l444, &out_frame);
     if (ret != 0) {
         LOGE("mc_nscaler_enable failed ret=%d", ret);
         env->ReleaseByteArrayElements(input, in_bytes, JNI_ABORT);

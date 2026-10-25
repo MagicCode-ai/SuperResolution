@@ -1,28 +1,30 @@
 # MagicCode Super-Resolution (MagicSR) User Guide
 
-Version: v2.2.0 (`mc_nscaler_version()`)
+Version: v3.0.0 (`mc_nscaler_version()`)
 Applies to: Native SDK
-Platforms: Android (Vulkan / OpenGLES), iOS / macOS (Metal), Windows (Vulkan / Direct3D 11 / OpenGL 4.3), CPU (x86 / NEON, spatial)
+Platforms: Android (Vulkan / OpenGLES), iOS / macOS (Metal), Windows (Vulkan / Direct3D 11 / OpenGL 4.3), CPU (x86 / NEON, image)
 
 中文版：[`用户使用说明书.md`](用户使用说明书.md)
 
-Header: `interface/mc_interface.h`
+Header: `interface/mc_interface.h`. Public `MC_ERROR_*` codes: `interface/mc_error.h` (included by `mc_interface.h`).
 
 ---
 
 ## 1. Product Overview
 
-MagicSR upscales a caller-owned image and writes the result into a caller-owned output. Spatial modes take one color image per frame. Temporal modes also take depth, motion vectors, jitter, and camera parameters.
+Graphic SR (graphic super-resolution) uses rendered content as its input, for example games or virtual humans. Image SR (image super-resolution) uses real camera-captured content as its input, for example photos or video.
+
+MagicSR upscales a caller-owned image and writes the result into a caller-owned output. Image modes take one color image per frame. Graphic modes also take depth, motion vectors, jitter, and camera parameters.
 
 There is one public API:
 
 | Call | Role |
 |------|------|
 | `mc_nscaler_control(..., MC_NSCALER_CMD_SET_PARAM, &ctrl, NULL)` | Create the handle from `ctrl_param_t` when `*handle` is NULL. Later calls update mutable settings. |
-| `mc_nscaler_enable(&handle, &in_frame, &out_frame)` | Process one frame. |
+| `mc_nscaler_enable(&handle, in2, &out_frame)` | Process one frame. `in2` is `mc_nscaler_input_frame_t *in2[2]`; `[0]` is the input before the interpolate position (the only input in non-GEN modes). `[1]` is after it and is ignored unless a GEN_* mode is selected. |
 | `mc_nscaler_control(..., MC_NSCALER_CMD_QUERY_STATUS, NULL, &status)` | Read sizes, mode, `gpu_time`, and `error_code`. |
 | `mc_nscaler_disable(handle)` | Release the handle. |
-| `mc_nscaler_version()` | Static version string, currently `v2.2.0`. |
+| `mc_nscaler_version()` | Static version string, currently `v3.0.0`. |
 
 Zero-initialize every struct, then set the fields you use. The caller owns every GPU texture and CPU buffer. The library does not allocate the output image and does not free the caller's resources.
 
@@ -30,7 +32,7 @@ Zero-initialize every struct, then set the fields you use. The caller owns every
 
 ## 2. Libraries
 
-Link **one** of the static archive or the dynamic library for the target. Both export the same `mc_nscaler_*` symbols. Include `interface/mc_interface.h`.
+Link **one** of the static archive or the dynamic library for the target. Both export the same `mc_nscaler_*` symbols. Include `interface/mc_interface.h` (`mc_error.h` is included by that header).
 
 | Platform | Static | Dynamic |
 |----------|--------|---------|
@@ -38,7 +40,7 @@ Link **one** of the static archive or the dynamic library for the target. Both e
 | Android (arm64-v8a) | `lib/android/libmagic_sr.a` | `lib/android/libmagic_sr.so` |
 | macOS Apple Silicon (macOS 14+) | `lib/mac_arm/libmagic_sr.a` | `lib/mac_arm/libmagic_sr.dylib` |
 | Windows (x86-64) | `lib/windows/libmagic_sr.lib` | `lib/windows/libmagic_sr.dll` |
-| Linux (x86-64, CPU spatial) | `lib/linux/libmagic_sr.a` | `lib/linux/libmagic_sr.so` |
+| Linux (x86-64, CPU image) | `lib/linux/libmagic_sr.a` | `lib/linux/libmagic_sr.so` |
 
 Apple static archives still need the system frameworks at app link time: Foundation, Metal, QuartzCore, MetalFX, MetalKit, MetalPerformanceShaders. The iOS and macOS dylibs already link those frameworks. Android `.so` already links `liblog`, `libGLESv3`, `libEGL`, and `libvulkan`.
 
@@ -46,7 +48,7 @@ iOS and macOS dylib install name: `@rpath/libmagic_sr.dylib`. How to embed the i
 
 ---
 
-## 3. Quick Start (spatial, Metal)
+## 3. Quick Start (image, Metal)
 
 ```c
 #include "mc_interface.h"
@@ -62,7 +64,7 @@ int sr_init(const char *model_path)
     ctrl.input_type = INPUT_TEXTURE_RGB8Unorm;
     strncpy(ctrl.model_path, model_path, sizeof(ctrl.model_path) - 1);
     ctrl.scaler_factor = 2.0f;
-    ctrl.alg_mode = SPATIAL_BALANCED_MODE;
+    ctrl.alg_mode = SR_BALANCED_MODE_FOR_IMAGE;
     ctrl.backend = MAGIC_BACKEND_METAL;
     ctrl.log_level = MAGIC_LOG_ERROR;
     ctrl.spatial_sharpen_level = 0; /* 0..5 */
@@ -91,7 +93,8 @@ int sr_process(void *in_tex, void *out_tex,
     out.format = pixel_format;
     out.width = out_w;
     out.height = out_h;
-    return mc_nscaler_enable(&g_handle, &in, &out);
+    mc_nscaler_input_frame_t *in2[2] = { &in, NULL };
+    return mc_nscaler_enable(&g_handle, in2, &out);
 }
 
 void sr_shutdown(void)
@@ -120,7 +123,7 @@ The first `mc_nscaler_enable` must pass a non-zero `width` and `height` in `[64,
 2. `mc_nscaler_enable` reads the input and writes the output. Both images stay owned by the caller.
 3. Repeating `enable` with the same size and scale reuses internal GPU resources.
 4. `mc_nscaler_disable` frees the handle. Do not use it afterward.
-5. Query status with `MC_NSCALER_CMD_QUERY_STATUS`. `output_status_params_t.error_code` is `0` on success. Negative `MC_ERROR_*` values are listed in `mc_interface.h`.
+5. Query status with `MC_NSCALER_CMD_QUERY_STATUS`. `output_status_params_t.error_code` is `0` on success. Negative `MC_ERROR_*` values are listed in `mc_error.h` (`mc_interface.h` includes it).
 
 `SET_PARAM` before the first sized `enable` uses a placeholder input of 640×360 until that `enable` supplies the real size.
 
@@ -132,18 +135,22 @@ The first `mc_nscaler_enable` must pass a non-zero `width` and `height` in `[64,
 
 | Mode | Range |
 |------|-------|
-| Spatial | `[1, 8]` |
-| Temporal | `(1, 8]` (1.0 is rejected) |
+| Image | `[1, 8]` |
+| Graphic | `(1, 8]` (1.0 is rejected) |
 | x86 / NEON | Implemented integer scales |
 
 `ctrl_param_t.alg_mode`
 
 | Value | Enum | Behavior |
 |-------|------|----------|
-| 0 | `SPATIAL_SPEED_MODE` | Spatial, throughput first |
-| 1 | `SPATIAL_BALANCED_MODE` | Spatial, quality and cost balanced |
-| 2 | `TEMPORAL_SPEED_MODE` | Temporal. See §9. |
-| 3 | `TEMPORAL_BALANCED_MODE` | Temporal. See §9. |
+| 0 | `SR_SPEED_MODE_FOR_IMAGE` | Image, throughput first |
+| 1 | `SR_BALANCED_MODE_FOR_IMAGE` | Image, quality and cost balanced |
+| 2 | `SR_SPEED_MODE_FOR_GRAPHIC` | Graphic. See §9. |
+| 3 | `SR_BALANCED_MODE_FOR_GRAPHIC` | Graphic. See §9. |
+| 4 | `GEN_SPEED_MODE_FOR_GRAPHIC` | Frame generation Fast (analytic, no weights). Vulkan only, Windows/Linux `libmagic_sr` with `MAGIC_SR_HAS_FG`. Combinable with any of the 4 SR modes. Other backends return `-100050` / `-102013`. Bare `4` equals `SR_SPEED_MODE_FOR_IMAGE\|GEN_SPEED_MODE_FOR_GRAPHIC`. |
+| 8 | `GEN_BALANCED_MODE_FOR_GRAPHIC` | Frame generation CoreV3. Same availability as Fast. Needs `ctrl_param_t.model_path` as the FG weight file (typically `model/magic_fg_core.bin`). Empty path uses `MAGIC_FG_WEIGHT_PATH`, then `magic_fg_core.bin`, then `model/magic_fg_core.bin`. |
+
+`MAX_ALG_MODE` is `16` (explicit). Both GEN bits together (`12`) are illegal (`MC_ERROR_INIT_ALG_MODE_OUT_OF_RANGE`). SR and GEN may be OR-ed. Public headers expose `MAX_ALG_MODE` and `MC_ALG_GEN_MASK` (`0xC`).
 
 `spatial_sharpen_level` is an integer in `[0, 5]`. `0` is off. Higher levels increase sharpening strength.
 
@@ -153,19 +160,38 @@ The first `mc_nscaler_enable` must pass a non-zero `width` and `height` in `[64,
 
 ## 6. Textures and Size
 
-GPU spatial input is `INPUT_TEXTURE_RGB8Unorm` (RGBA8). `INPUT_TEXTURE_R8Unorm` is the single-channel GPU path. CPU spatial uses `INPUT_BUFFER_R8` or `INPUT_BUFFER_RGB` (planar R, then G, then B).
+GPU image input is `INPUT_TEXTURE_RGB8Unorm` (RGBA8). `INPUT_TEXTURE_R8Unorm` is the single-channel GPU path. CPU image uses `INPUT_BUFFER_R8` or `INPUT_BUFFER_RGB` (planar R, then G, then B).
 
-`magic_resource_t` and the frame structs carry no automatic size query. Pass `width` and `height` on `mc_nscaler_input_frame_t`. Vulkan `format` is a `VkFormat`. `layout` 0 means undefined and fails temporal validation; set the layout the image actually has when `enable` runs.
+`magic_resource_t` and the frame structs carry no automatic size query. Pass `width` and `height` on `mc_nscaler_input_frame_t`. Vulkan `format` is a `VkFormat`. `layout` 0 means undefined and fails graphic validation; set the layout the image actually has when `enable` runs.
 
 GL / GLES do not make a context current. The calling thread must already have one on the first `enable`.
 
 ---
 
+## 6.1 Frame generation (GEN, Vulkan only)
+
+A handle created with a GEN bit supports two `mc_nscaler_enable` usages:
+
+- `in_frame[1] == NULL` — existing SR path. `in_frame[0]` is the only input.
+- `in_frame[1] != NULL` — interpolate t=0.5 between `[0]` and `[1]` into `out_frame`.
+
+Non-GEN handles never read `in_frame[1]`.
+
+**Resolution.** GEN color (`in_frame[0/1]` and `out_frame`) is **output** resolution (post-SR). Depth and motion stay at render (input) resolution. The FG shaders sample them with normalized UV; the library does not copy or stretch.
+
+**Required GEN inputs.** Both frames need color, depth, and a recording `command_buffer` on `[0]`. At least one motion-vector texture is required (typically on `[1]`). Missing items return the existing `MC_ERROR_TEMPORAL_*` codes (`MISSING_COLOR` / `MISSING_DEPTH` / `MISSING_MOTION` / `COMMAND_BUFFER`). Vulkan GEN uses the same command-buffer contract as Vulkan Graphic (Vulkan Temporal): the library only records; the caller submits.
+
+**Weights (GEN_BALANCED / CoreV3).** Set `ctrl_param_t.model_path` on the creating `SET_PARAM` to the FG weight file path. Empty `model_path` uses the default search: `MAGIC_FG_WEIGHT_PATH`, then `magic_fg_core.bin` in the working directory, then `model/magic_fg_core.bin`. `model_path` is immutable after create; changing weights requires `mc_nscaler_disable` and a new handle. Missing weights return `-100051` / `-102014`. GEN_SPEED (Fast) needs no weights.
+
+**Availability.** Windows and Linux `libmagic_sr` include FG (`MAGIC_SR_HAS_FG`). Android / iOS builds do not. D3D11 / Metal / GLES / OpenGL / CPU still return `-100050` at create.
+
+---
+
 ## 7. Model File
 
-Set `ctrl_param_t.model_path` to an absolute path of a readable `.bin` before the creating `SET_PARAM`. The path is at most 255 characters plus a NUL. An empty path or a file that cannot be opened returns `MC_ERROR_INIT_MODEL_FILE_OPEN_FAILED` (`-100029`) or `MC_ERROR_INIT_LOAD_PARAMS_FAILED` (`-100012`).
+Set `ctrl_param_t.model_path` to an absolute path of a readable `.bin` before the creating `SET_PARAM`. The path is at most 255 characters plus a NUL. An empty path or a file that cannot be opened returns `MC_ERROR_INIT_MODEL_FILE_OPEN_FAILED` (`-100029`) or `MC_ERROR_INIT_LOAD_PARAMS_FAILED` (`-100012`). For GEN_BALANCED, the same field is the FG weight file; see §6.1.
 
-The current combined model is `model/magic_sr_gpu_params.bin`. Spatial mode and sharpen select a segment inside that file. Pass that file's absolute path. The library does not search the working directory and does not read an environment variable for the model.
+The current combined model is `model/magic_sr_gpu_params.bin`. Image mode and sharpen select a segment inside that file. Pass that file's absolute path. The library does not search the working directory and does not read an environment variable for the model.
 
 `tools/setup_models.sh` only copies `.bin` files. After it runs, the app still sets `model_path` to the absolute path of the file it will load.
 
@@ -199,13 +225,13 @@ The dylib must be loaded from inside the app bundle.
 
 ### 8.5 Linux
 
-`lib/linux/libmagic_sr.so` is x86-64. This build is the CPU spatial library. Link with `-Llib/linux -lmagic_sr` and an rpath such as `$ORIGIN` if the `.so` sits beside the executable, or pass the full path of the `.so` to the linker. Load it at runtime with `dlopen` only from a path the process is allowed to read. The static archive is `lib/linux/libmagic_sr.a`.
+`lib/linux/libmagic_sr.so` is x86-64. This build is the CPU image library. Link with `-Llib/linux -lmagic_sr` and an rpath such as `$ORIGIN` if the `.so` sits beside the executable, or pass the full path of the `.so` to the linker. Load it at runtime with `dlopen` only from a path the process is allowed to read. The static archive is `lib/linux/libmagic_sr.a`.
 
 ---
 
-## 9. Temporal Super-Resolution
+## 9. Graphic Super-Resolution
 
-Temporal modes accumulate history from color, depth, and motion. They are `TEMPORAL_SPEED_MODE` and `TEMPORAL_BALANCED_MODE` on the same handle API. CPU backends reject them with `MC_ERROR_INIT_BACKEND_UNAVAILABLE`.
+Graphic modes accumulate history from color, depth, and motion. They are `SR_SPEED_MODE_FOR_GRAPHIC` and `SR_BALANCED_MODE_FOR_GRAPHIC` on the same handle API. CPU backends reject them with `MC_ERROR_INIT_BACKEND_UNAVAILABLE`.
 
 Create with `SET_PARAM`. Each `mc_nscaler_enable` must set `in_frame.frame` to a `temporal_frame_t` whose `struct_size` is `sizeof(temporal_frame_t)`.
 
@@ -234,7 +260,7 @@ int temporal_vk_init(VkPhysicalDevice phys, VkDevice dev, const char *model)
     ctrl.input_type = INPUT_TEXTURE_RGB8Unorm;
     strncpy(ctrl.model_path, model, sizeof(ctrl.model_path) - 1);
     ctrl.scaler_factor = 2.0f; /* (1, 8] */
-    ctrl.alg_mode = TEMPORAL_SPEED_MODE;
+    ctrl.alg_mode = SR_SPEED_MODE_FOR_GRAPHIC;
     ctrl.backend = MAGIC_BACKEND_VULKAN;
     ctrl.log_level = MAGIC_LOG_ERROR;
     ctrl.gpu_context.physical_device = phys;
@@ -244,7 +270,7 @@ int temporal_vk_init(VkPhysicalDevice phys, VkDevice dev, const char *model)
 }
 ```
 
-Fill `mc_nscaler_input_frame_t` / `mc_nscaler_output_frame_t` as in §3, set `in.frame` to the temporal descriptor, set `in.command_buffer` to the recording buffer, and call `mc_nscaler_enable`.
+Fill `mc_nscaler_input_frame_t` / `mc_nscaler_output_frame_t` as in §3, set `in.frame` to the graphic descriptor, set `in.command_buffer` to the recording buffer, and call `mc_nscaler_enable`.
 
 | Backend | `gpu_context` | Command buffer |
 |---------|---------------|----------------|
@@ -258,10 +284,10 @@ Fill `mc_nscaler_input_frame_t` / `mc_nscaler_output_frame_t` as in §3, set `in
 ## 10. FAQ
 
 **Q: `SET_PARAM` or `enable` returns a negative code?**
-A: Read `output_status_params_t.error_code` and the `MC_ERROR_*` list in `mc_interface.h`. Common create failures: model path (`-100029`, `-100012`), size outside `[64, 4032]` (`-100002`, `-100003`), scale out of range (`-100004`), GPU device missing (`-100025`).
+A: Read `output_status_params_t.error_code` and the `MC_ERROR_*` list in `mc_error.h` (`mc_interface.h` includes it). Common create failures: model path (`-100029`, `-100012`), size outside `[64, 4032]` (`-100002`, `-100003`), scale out of range (`-100004`), GPU device missing (`-100025`). GEN on a non-Vulkan backend or a build without FG returns `-100050` / `-102013`. Missing GEN_BALANCED weights return `-100051` / `-102014`. Vulkan FG pipeline create failure is `-100052` / `-102015`.
 
 **Q: Which library do I link?**
-A: One file from §2. Static `.a` / `.lib` or the matching dynamic library. The header is always `mc_interface.h`.
+A: One file from §2. Static `.a` / `.lib` or the matching dynamic library. Include `mc_interface.h` (it includes `mc_error.h`).
 
 **Q: Who allocates the output texture?**
 A: The caller. Pass it on `mc_nscaler_output_frame_t`. Release it with the graphics API that created it, after `mc_nscaler_disable` or after the GPU work that used it has finished.
@@ -281,7 +307,7 @@ A: `spatial_sharpen_level` is 0 through 5. 0 turns sharpening off. Higher values
 
 | Item | Path |
 |------|------|
-| Header | `interface/mc_interface.h` |
+| Header | `interface/mc_interface.h` (includes `interface/mc_error.h`) |
 | iOS static / dynamic | `lib/ios/libmagic_sr.a`, `lib/ios/libmagic_sr.dylib` |
 | Android static / dynamic | `lib/android/libmagic_sr.a`, `lib/android/libmagic_sr.so` |
 | macOS arm static / dynamic | `lib/mac_arm/libmagic_sr.a`, `lib/mac_arm/libmagic_sr.dylib` |

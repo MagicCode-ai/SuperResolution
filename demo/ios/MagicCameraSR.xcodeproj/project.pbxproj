@@ -178,7 +178,8 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../../../lib/ios";
 				OTHER_LDFLAGS = (
-					"-lmagic_sr",
+					"-force_load",
+					"$(SRCROOT)/../../../lib/ios/libmagic_sr.a",
 					"-framework",
 					AVFoundation,
 					"-framework",
@@ -196,7 +197,7 @@
 					"-framework",
 					QuartzCore,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.joey.magiccamerasr;
+				PRODUCT_BUNDLE_IDENTIFIER = com.joey.magicmagnifiersr;
 				PRODUCT_NAME = MagicMagnifierSR;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -215,7 +216,8 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../../../lib/ios";
 				OTHER_LDFLAGS = (
-					"-lmagic_sr",
+					"-force_load",
+					"$(SRCROOT)/../../../lib/ios/libmagic_sr.a",
 					"-framework",
 					AVFoundation,
 					"-framework",
@@ -233,7 +235,7 @@
 					"-framework",
 					QuartzCore,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.joey.magiccamerasr;
+				PRODUCT_BUNDLE_IDENTIFIER = com.joey.magicmagnifiersr;
 				PRODUCT_NAME = MagicMagnifierSR;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";

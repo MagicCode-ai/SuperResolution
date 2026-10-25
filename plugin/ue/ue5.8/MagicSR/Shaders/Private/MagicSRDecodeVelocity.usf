@@ -1,0 +1,137 @@
+// Decode UE velocity → MagicSR UV motion (RG16F), and optionally an R16F reactive mask.
+// MagicSR contract: stored * (W,H) = input-pixel displacement, +Y down, current + MV = prev.
+//
+// Desktop static meshes are excluded from the velocity mesh pass, so SceneVelocity is
+// often 1x1 black (encoded x <= 0). That clear means "no dynamic velocity", not "no
+// camera motion". Those pixels take the same camera path as TSR ComputeStaticVelocity:
+// raw device Z through View.ClipToPrevClip (no gamma). Dynamic texels (encoded x > 0)
+// keep the SM5 gamma undo and the NDC→UV sign.
+//
+// FScreenVertexShaderVS on desktop does not write TEXCOORD0. Sample UVs are rebuilt
+// from SV_Position (see DecodeMotion).
+
+#include "/Engine/Public/Platform.ush"
+#include "/Engine/Generated/GeneratedUniformBuffers.ush"
+
+Texture2D EncodedVelocityTexture;
+SamplerState EncodedVelocitySampler;
+Texture2D SceneDepthTexture;
+SamplerState SceneDepthSampler;
+
+float4 OutputUVMinMax;          // xy=min uv of view in the velocity texture, zw=max
+float2 OutputSize;              // input pixels; stored UV * size = pixel MV
+float ReactiveStartPx;          // |MV| below this stays 0 (static)
+float ReactiveSatPx;            // |MV| at/above this → reactive 1
+float4 TexelToScreenScaleBias;  // ScreenPos = (depthTexel + 0.5) * xy + zw
+float2 ViewRectMin;
+float2 DepthExtent;
+uint bHasDynamicVelocity;
+uint bStencilReactive;              // 1 = read CustomDepth stencil (marked meshes)
+uint StencilReactiveValue;          // stencil value that marks "history untrustworthy"
+float StencilReactiveStrength;      // reactive written on marked pixels (0..1)
+Texture2D<uint2> CustomStencilTexture;
+
+// Mirrors Engine/Private/Common.ush DecodeVelocityFromTexture (no VELOCITY_ENCODE_GAMMA/DEPTH).
+float2 DecodeVelocityXY(float2 EncodedXY)
+{
+	const float InvDiv = 1.0f / (0.499f * 0.5f);
+	return EncodedXY * InvDiv - (32767.0f / 65535.0f) * InvDiv;
+}
+
+// UE screen velocity is currentNDC - prevNDC, Y up. MagicSR wants currentUV + MV = prevUV, +Y down.
+float2 ScreenVelToUv(float2 ScreenVel)
+{
+	return float2(-ScreenVel.x * 0.5, ScreenVel.y * 0.5);
+}
+
+float2 CameraScreenVel(float2 SvPosition)
+{
+	float2 InputPixel = floor(SvPosition.xy) + ViewRectMin;
+	float2 ScreenPos = (InputPixel + 0.5) * TexelToScreenScaleBias.xy + TexelToScreenScaleBias.zw;
+	float2 DepthUV = (InputPixel + 0.5) / max(DepthExtent, float2(1.0, 1.0));
+	float DeviceZ = SceneDepthTexture.SampleLevel(SceneDepthSampler, DepthUV, 0).r;
+	float4 PrevClip = mul(float4(ScreenPos, DeviceZ, 1.0), View.ClipToPrevClip);
+	float2 PrevScreen = PrevClip.xy / PrevClip.w;
+	return ScreenPos - PrevScreen;
+}
+
+void DecodeMotion(float2 SvPosition, out float2 UvVel)
+{
+	UvVel = float2(0.0, 0.0);
+	if (bHasDynamicVelocity != 0u)
+	{
+		float2 DestUV = (SvPosition + 0.5) / max(OutputSize, float2(1.0, 1.0));
+		float2 SampleUV = lerp(OutputUVMinMax.xy, OutputUVMinMax.zw, DestUV);
+		float4 Encoded = EncodedVelocityTexture.SampleLevel(EncodedVelocitySampler, SampleUV, 0);
+		// UE velocity clear (0,0) is encoded with x <= 0: fall through to camera motion.
+		if (Encoded.x > 0.0)
+		{
+			float2 ScreenVel = DecodeVelocityXY(Encoded.xy);
+			// SM5 EncodeVelocityToTexture applies sign(v)*sqrt(|v|)*sqrt(2) before the 16-bit bias.
+			ScreenVel = ScreenVel * abs(ScreenVel) * 0.5;
+			UvVel = ScreenVelToUv(ScreenVel);
+			return;
+		}
+	}
+	UvVel = ScreenVelToUv(CameraScreenVel(SvPosition));
+}
+
+float ReactiveFromMotion(float2 UvVel, out float2 SnappedVel)
+{
+	float PxLen = length(UvVel * OutputSize);
+	float Span = ReactiveSatPx - ReactiveStartPx;
+	// Snap sub-threshold motion to exact zero: float math (matrix mul, w-divide)
+	// leaves epsilon noise that the library reads as real motion at edges.
+	// Below ReactiveStartPx the pixel is static by definition, so restore the
+	// exact-zero behavior the stub clear used to give.
+	if (PxLen < ReactiveStartPx)
+	{
+		SnappedVel = float2(0.0, 0.0);
+		return 0.0;
+	}
+	SnappedVel = UvVel;
+	if (Span <= 0.0)
+	{
+		return 0.0;
+	}
+	return smoothstep(ReactiveStartPx, ReactiveSatPx, PxLen);
+}
+
+// Pixels of meshes the app marked via CustomDepth stencil (TV / video wall / screen
+// content that changes without motion vectors). Speed's still-accumulation path ignores
+// weak reactive, so the strength is meant to be 1 (the library honors >= ~0.9 there).
+float MarkedReactive(float2 SvPosition)
+{
+	if (bStencilReactive == 0u)
+	{
+		return 0.0;
+	}
+	float2 InputPixel = floor(SvPosition.xy) + ViewRectMin;
+	uint Stencil = CustomStencilTexture.Load(int3(int2(InputPixel), 0)) STENCIL_COMPONENT_SWIZZLE;
+	return (Stencil == StencilReactiveValue) ? StencilReactiveStrength : 0.0;
+}
+
+#if MAGICSR_WRITE_REACTIVE
+void MainPS(
+	in float4 SvPosition : SV_POSITION,
+	out float4 OutMotion : SV_Target0,
+	out float4 OutReactive : SV_Target1)
+{
+	float2 UvVel;
+	DecodeMotion(SvPosition.xy, UvVel);
+	float2 SnappedVel;
+	float Reactive = ReactiveFromMotion(UvVel, SnappedVel);
+	Reactive = max(Reactive, MarkedReactive(SvPosition.xy));
+	OutMotion = float4(SnappedVel, 0.0, 0.0);
+	OutReactive = float4(Reactive, 0.0, 0.0, 0.0);
+}
+#else
+void MainPS(
+	in float4 SvPosition : SV_POSITION,
+	out float4 OutMotion : SV_Target0)
+{
+	float2 UvVel;
+	DecodeMotion(SvPosition.xy, UvVel);
+	OutMotion = float4(UvVel, 0.0, 0.0);
+}
+#endif

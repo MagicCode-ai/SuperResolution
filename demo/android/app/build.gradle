@@ -8,7 +8,7 @@ android {
     ndkVersion '29.0.14033849'
 
     defaultConfig {
-        applicationId "com.example.magiccamera"
+        applicationId "com.example.magicmagnifier"
         minSdk 26
         targetSdk 34
         versionCode 1

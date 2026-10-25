@@ -1,0 +1,57 @@
+// Composite generated scene into the swapchain image while preserving UI
+// that was already drawn on the real frame (not interpolated).
+// FScreenVertexShaderVS on desktop does not write TEXCOORD0; rebuild UV from SV_Position.
+
+#include "/Engine/Public/Platform.ush"
+
+Texture2D GeneratedTexture;
+Texture2D RealTexture;
+Texture2D ComposedTexture;
+SamplerState PointSampler;
+float UiThresh;
+uint UiMode;
+float BandY;
+float2 InvSize;
+
+float UiDelta(float2 UV)
+{
+	const float3 Composed = ComposedTexture.SampleLevel(PointSampler, UV, 0).rgb;
+	const float3 Real = RealTexture.SampleLevel(PointSampler, UV, 0).rgb;
+	return distance(Composed, Real);
+}
+
+void MainPS(
+	in float4 SvPosition : SV_POSITION,
+	out float4 OutColor : SV_Target0)
+{
+	const float2 UV = (SvPosition.xy + 0.5) * InvSize;
+	if (UiMode == 4u)
+	{
+		OutColor = float4(1.0, 0.0, 1.0, 1.0);
+		return;
+	}
+
+	const float3 Gen = GeneratedTexture.SampleLevel(PointSampler, UV, 0).rgb;
+	if (UiMode == 0u)
+	{
+		OutColor = float4(Gen, 1.0);
+		return;
+	}
+
+	const float3 Composed = ComposedTexture.SampleLevel(PointSampler, UV, 0).rgb;
+	if (UiMode == 2u)
+	{
+		const bool bBand = UV.y < BandY || UV.y > (1.0 - BandY);
+		OutColor = float4(bBand ? Composed : Gen, 1.0);
+		return;
+	}
+
+	// UiMode 1: keep Slate pixels wherever Composed diverges from the tonemapped
+	// real scene. Dilate 1 texel so HUD glyphs do not sparkle through holes.
+	float D = UiDelta(UV);
+	D = max(D, UiDelta(UV + float2(InvSize.x, 0.0)));
+	D = max(D, UiDelta(UV - float2(InvSize.x, 0.0)));
+	D = max(D, UiDelta(UV + float2(0.0, InvSize.y)));
+	D = max(D, UiDelta(UV - float2(0.0, InvSize.y)));
+	OutColor = float4(D > UiThresh ? Composed : Gen, 1.0);
+}
