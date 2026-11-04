@@ -20,7 +20,7 @@
  *              and version query.
  * @author      MagicCode  Team
  * @date        2026-10-20
- * @version     V3.1.0
+ * @version     V3.1.1
  * @copyright   Copyright (C) 2024-2026 MagicCode Technology Co., Ltd. All rights reserved.
  * @website     https://www.magiccode-ai.com
  ************************************************************************************/
