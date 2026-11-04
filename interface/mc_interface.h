@@ -20,7 +20,7 @@
  *              and version query.
  * @author      MagicCode  Team
  * @date        2026-10-20
- * @version     V3.0.0
+ * @version     V3.1.0
  * @copyright   Copyright (C) 2024-2026 MagicCode Technology Co., Ltd. All rights reserved.
  * @website     https://www.magiccode-ai.com
  ************************************************************************************/
@@ -71,12 +71,6 @@ typedef enum alg_mode_e {
      * SR_BALANCED_MODE_FOR_IMAGE|GEN_SPEED_MODE_FOR_GRAPHIC combo. */
     MAX_ALG_MODE = 16
 } alg_mode_e;
-
-#define MC_ALG_SR_MASK  0x3
-#define MC_ALG_GEN_MASK 0xC
-#define MC_ALG_SR_OF(m)  ((m) & MC_ALG_SR_MASK)
-#define MC_ALG_GEN_OF(m) ((m) & MC_ALG_GEN_MASK)
-#define MC_ALG_HAS_GEN(m) (MC_ALG_GEN_OF(m) != 0)
 
 /*
  * Backend-neutral I/O resource. Color, output, depth, motion, reactive, and
@@ -434,7 +428,6 @@ struct mc_nscaler_output_frame_t {
  *          depth_infinite, and hdr_color are immutable: SET_PARAM ignores
  *          changes to those fields.
  */
-#define MC_CTRL_PARAM_ABI_VERSION 2u
 
 typedef struct ctrl_param_t {
     input_type_e input_type; //0 = buffer, 1 = r8_texture
