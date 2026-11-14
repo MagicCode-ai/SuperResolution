@@ -1,7 +1,7 @@
 {
   "FileVersion": 3,
   "Version": 3,
-  "VersionName": "3.1.0",
+  "VersionName": "3.3.0",
   "FriendlyName": "MagicSR",
   "Description": "MagicSR image/graphic super-resolution bridge (mc_nscaler_*). Linux Vulkan graphic + Windows D3D11/Vulkan.",
   "Category": "Rendering",
