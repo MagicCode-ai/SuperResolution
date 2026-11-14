@@ -43,9 +43,11 @@ extern "C" {
  *   MC_ERROR_INIT_ALG_MODE_GEN_NOT_AVAILABLE (-100050)
  *   MC_ERROR_INIT_FG_WEIGHTS                 (-100051)
  *   MC_ERROR_INIT_FG_CREATE_FAILED           (-100052)
+ *   MC_ERROR_INIT_ALG_MODE_GEN_BALANCED_UNSUPPORTED (-100053)
  *   MC_ERROR_CONTROL_ALG_MODE_GEN_NOT_AVAILABLE (-102013)
  *   MC_ERROR_CONTROL_FG_WEIGHTS               (-102014)
  *   MC_ERROR_CONTROL_FG_CREATE_FAILED         (-102015)
+ *   MC_ERROR_CONTROL_ALG_MODE_GEN_BALANCED_UNSUPPORTED (-102016)
  */
 
 /* Public error codes returned by MC_* APIs or exposed through output_status_params_t.error_code. */
@@ -101,6 +103,7 @@ extern "C" {
 #define MC_ERROR_INIT_ALG_MODE_GEN_NOT_AVAILABLE (-100050) /* GEN_* is not available (non-Vulkan or no FG in this build). */
 #define MC_ERROR_INIT_FG_WEIGHTS                  (-100051) /* GEN_BALANCED: FG weight file missing or invalid. */
 #define MC_ERROR_INIT_FG_CREATE_FAILED            (-100052) /* Vulkan FG handle/pipeline create failed. */
+#define MC_ERROR_INIT_ALG_MODE_GEN_BALANCED_UNSUPPORTED (-100053) /* Android: GEN_BALANCED is not supported. Use GEN_SPEED (M5) or GEN_ULTRASPEED (GEO_SPEED). */
 #define MC_ERROR_MEMORY_INIT_PARAMS_ALLOC_FAILED  (-200001) /* Memory allocation failed while parsing model parameters. */
 #define MC_ERROR_MEMORY_INIT_REINIT_ALLOC_FAILED  (-200002) /* Memory allocation failed during reinitialization. */
 #define MC_ERROR_MEMORY_INIT_THREAD_ALLOC_FAILED  (-200003) /* Memory allocation failed during thread pool initialization. */
@@ -161,6 +164,7 @@ extern "C" {
 #define MC_ERROR_CONTROL_ALG_MODE_GEN_NOT_AVAILABLE (-102013) /* GEN_* is not available (non-Vulkan or no FG in this build). */
 #define MC_ERROR_CONTROL_FG_WEIGHTS               (-102014) /* GEN_BALANCED: FG weight file missing or invalid (SET_PARAM). */
 #define MC_ERROR_CONTROL_FG_CREATE_FAILED         (-102015) /* Vulkan FG handle/pipeline create failed during SET_PARAM. */
+#define MC_ERROR_CONTROL_ALG_MODE_GEN_BALANCED_UNSUPPORTED (-102016) /* Android: GEN_BALANCED is not supported (SET_PARAM). */
 #define MC_ERROR_MEMORY_CONTROL_ALLOC_FAILED      (-202001) /* Memory allocation failed during control. */
 
 #define MC_ERROR_UNINIT_NULL_HANDLE               (-103001) /* mc_nscaler_disable received a NULL handle. */

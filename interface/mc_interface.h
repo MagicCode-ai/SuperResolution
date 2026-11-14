@@ -19,8 +19,8 @@
  *              initialization, image processing, parameter control, resource release,
  *              and version query.
  * @author      MagicCode  Team
- * @date        2026-10-20
- * @version     V3.2.0
+ * @date        2026-11-11
+ * @version     V3.3.0
  * @copyright   Copyright (C) 2024-2026 MagicCode Technology Co., Ltd. All rights reserved.
  * @website     https://www.magiccode-ai.com
  ************************************************************************************/
@@ -59,17 +59,41 @@ typedef enum alg_mode_e {
                                  * win per channel. Missing transparency binds
                                  * an internal zero texture; it is not a
                                  * semantic mask. */
-    GEN_SPEED_MODE_FOR_GRAPHIC = 1 << 2, /* =4. FG-Fast (analytic, no weights).
-                              * Vulkan + MAGIC_SR_HAS_FG only. Alone this equals
+    GEN_SPEED_MODE_FOR_GRAPHIC = 1 << 2, /* =4. FG-Fast. Vulkan + MAGIC_SR_HAS_FG
+                              * only. Alone this equals
                               * SR_SPEED_MODE_FOR_IMAGE|GEN_SPEED_MODE_FOR_GRAPHIC
-                              * because SR_SPEED_MODE_FOR_IMAGE is 0. */
+                              * because SR_SPEED_MODE_FOR_IMAGE is 0. Speed
+                              * product path is M5: lanczos2HV DS 50% +
+                              * FG_LR_FI=1 / FG_GPU_2DIR=1 (srlut_2dir 2x,
+                              * LUT sharpen=0) / FG_FI_DIRECT=1 / full-res
+                              * RCAS 0.6 (spatial level 1 default). */
     GEN_BALANCED_MODE_FOR_GRAPHIC = 1 << 3, /* =8. FG-CoreV3 (model_path = FG
                               * weight file; empty = default search).
-                              * Vulkan + MAGIC_SR_HAS_FG only. */
-    /* Explicit 16: without it the next implicit value would be 9, so
-     * (alg_mode_e)MAX_ALG_MODE would look like a legal
-     * SR_BALANCED_MODE_FOR_IMAGE|GEN_SPEED_MODE_FOR_GRAPHIC combo. */
-    MAX_ALG_MODE = 16
+                              * Vulkan + MAGIC_SR_HAS_FG only.
+                              * Win/Linux: native FSR MID + DIRECT + RCAS 0.1.
+                              * Android: not supported; create returns
+                              * MC_ERROR_INIT_ALG_MODE_GEN_BALANCED_UNSUPPORTED
+                              * (-100053). No silent fallback. */
+    /* bit4 = SR_ULTRA (0x10). bit5 = GEN_ULTRA (0x20). Independent so both
+     * can be on at once. Old values 0/1/2/3/4/8 and SR_ULTRA=18 stay.
+     * GEN_ULTRA moved 20 → 36 = GEN_SPEED|bit5. Combinations are
+     * SR[1:0] | GEN[3:2] | SR_ULTRA[4] | GEN_ULTRA[5]; both GEN bits still
+     * illegal. MAX=64 so 36/38/54 fit. Stale 20/22 are still in range:
+     * 20 = GEN_SPEED|SR_ULTRA (IMAGE SR), 22 = SR_ULTRA|GEN_SPEED. */
+    SR_ULTRASPEED_MODE_FOR_GRAPHIC = SR_SPEED_MODE_FOR_GRAPHIC | (1 << 4),
+                              /* =18. Vulkan: 1x SR_SPEED_MODE_FOR_GRAPHIC
+                               * then srlut_4dir to 2x then RCAS level1 (s=0.6).
+                               * Other backends keep SPEED routing (no crash). */
+    GEN_ULTRASPEED_MODE_FOR_GRAPHIC = GEN_SPEED_MODE_FOR_GRAPHIC | (1 << 5),
+                              /* =36. Windows Vulkan: GEO_SPEED heavy/geo
+                               * fast core at display res (pre/core/comp).
+                               * No LR, no srlut_2dir/4dir wrap, no M5 fill.
+                               * Not a GEN-bit conflict: GEN_SPEED stays 4.
+                               * Combine with SR: SPEED|GEN_ULTRA=38,
+                               * SR_ULTRA|GEN_ULTRA=54. Windows Balanced
+                               * stays native. Android does not support
+                               * GEN_BALANCED. */
+    MAX_ALG_MODE = 64
 } alg_mode_e;
 
 /*
@@ -353,6 +377,16 @@ typedef struct temporal_frame_t {
     float vp0[16];
     float vp1[16];
     uint32_t have_view_projection;
+    /*
+     * Optional GEN 3x (Vulkan GEN_BALANCED / GEN_SPEED / GEN_ULTRASPEED on
+     * Windows / Linux / Android). 0 or 2 = one generated frame at t=0.5
+     * (default). 3 = two generated frames at t=1/3 and 2/3 written to
+     * out_frame and fg_output2. Android supports SPEED / ULTRASPEED only
+     * (GEN_BALANCED is rejected at create). Other backends ignore this and
+     * keep 2x. Read only when struct_size covers the field.
+     */
+    uint32_t fg_frame_mult;
+    magic_resource_t fg_output2;
 } temporal_frame_t;
 
 /** Byte size of the current prefix (fields through transparency). */
@@ -435,7 +469,7 @@ typedef struct ctrl_param_t {
                                    // GEN: FG weight file; empty = MAGIC_FG_WEIGHT_PATH /
                                    // magic_fg_core.bin / model/magic_fg_core.bin.
     float scaler_factor;           // Requested super-resolution scaling factor. Spatial: [1, 8]. Temporal: (1, 8]. x86/neon accept implemented integer scales only.
-    alg_mode_e alg_mode;         // SR bits 0..3; optional GEN_SPEED=4 or GEN_BALANCED=8 (not both). MAX_ALG_MODE=16.
+    alg_mode_e alg_mode;         // SR bits 0..1; optional GEN_SPEED=4 or GEN_BALANCED=8 (not both); optional SR_ULTRA bit4=16 and/or GEN_ULTRA bit5=32. MAX_ALG_MODE=64. Android: GEN_BALANCED create-fails (-100053).
     log_level_e log_level;
     magic_backend_e backend;       // Runtime backend selector: x86/neon/metal/opengl/opengles/vulkan.
     unsigned int spatial_sharpen_level; // Spatial sharpen grade [0, 5]. 0 = off, 5 = strongest.
@@ -560,18 +594,33 @@ typedef enum mc_cmd_e {
  *        GEN (Vulkan only, library built with MAGIC_SR_HAS_FG):
  *          in_frame[1] == NULL → existing SR path (in_frame[0] is the input).
  *          in_frame[1] != NULL → interpolate t=0.5 between [0] and [1] into
- *            out_frame. Color of [0]/[1]/out is OUTPUT resolution (post-SR).
+ *            out_frame (default 2x). Vulkan GEN_BALANCED / SPEED / ULTRA on
+ *            Windows / Linux / Android may request 3x via
+ *            temporal_frame_t.fg_frame_mult=3 + fg_output2 (t=1/3, 2/3).
+ *            BALANCED/SPEED: OF+prepare once, FI twice. ULTRA: GEO pre/core/comp
+ *            per t. Android: SPEED / ULTRASPEED only (no BALANCED).
+ *            Other backends keep 2x.
+ *            Color of [0]/[1]/out is OUTPUT resolution (post-SR).
  *            Depth and motion stay at render (input) resolution; FG samples
  *            them with normalized UV so the library does not copy/stretch.
- *          GEN_SPEED → FG-Fast (analytic, no weights). GEN_BALANCED →
- *            FG-CoreV3 (ctrl_param_t.model_path is the FG weight file;
- *            empty uses MAGIC_FG_WEIGHT_PATH / magic_fg_core.bin /
- *            model/magic_fg_core.bin).
+ *          GEN_SPEED → M5 (lanczos2HV DS 50% + FSR OF+FI + FI_DIRECT +
+ *            srlut_2dir 2x LUT sharpen=0 + full-res RCAS 0.6).
+ *            GEN_BALANCED → FG-CoreV3 on Win/Linux
+ *            (ctrl_param_t.model_path is the FG weight file; empty uses
+ *            MAGIC_FG_WEIGHT_PATH / magic_fg_core.bin /
+ *            model/magic_fg_core.bin). Android create returns
+ *            MC_ERROR_INIT_ALG_MODE_GEN_BALANCED_UNSUPPORTED (-100053);
+ *            no silent fallback to SPEED/M5.
+ *          GEN_ULTRASPEED (=36): GEO_SPEED heavy/geo fast core at
+ *            display res (no M5, no 4dir wrap). Windows Balanced stays native.
+ *            Android does not support GEN_BALANCED.
+ *            May be OR'd with SR_ULTRA (54) or SR_SPEED (38).
  *          Vulkan GEN records into in_frame[0].command_buffer, same contract
  *            as Vulkan Temporal (no submit, no wait). NULL command_buffer
  *            returns MC_ERROR_TEMPORAL_COMMAND_BUFFER.
  *          Other backends / builds without FG still return
  *            MC_ERROR_INIT_ALG_MODE_GEN_NOT_AVAILABLE (-100050) at create.
+ *            Android GEN_BALANCED returns -100053 (not -100050).
  * @param out_frame Output color. width/height 0,0 use the handle output size.
  *        Process runs only when both in and out native handles are present.
  * @return 0 on success; negative MC_ERROR_* on failure.
