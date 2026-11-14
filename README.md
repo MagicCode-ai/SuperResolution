@@ -60,15 +60,15 @@ The image quality comparison shows outputs from Bilinear, SGSR1.0, MagicSR Speed
 
 ### 2x Temporal Super-Resolution Processing Speed Test
 
-#### iOS Super-Resolution Speed Comparison
+#### Desktop Super-Resolution Speed Comparison
 
-Test platform: A16Pro CPU. Metric: processing time in ms.
+Test platform: 13th Gen Intel Core i7-13700HX CPU. Metric: processing time in ms.
 
 | Method | Time (ms) |
 | --- | ---: |
-| MagicSR Temporal Speed | 17.18 |
-| MetalFX | 17.73 |
-| MagicSR Temporal Balanced | 23.88 |
+| MagicSR Temporal Ultraspeed | 1.44 |
+| MagicSR Temporal Speed | 2.06 |
+| FSR3 | 2.57 |
 
 #### Android Vulkan Super-Resolution Speed Comparison
 
@@ -76,15 +76,15 @@ Test platform: Qualcomm Snapdragon 888 CPU. Metric: processing time in ms.
 
 | Method | Time (ms) |
 | --- | ---: |
+| MagicSR Temporal Ultraspeed | 15.85 |
 | SGSR2.0 | 22.231 |
 | MagicSR Temporal Speed | 22.648 |
-| MagicSR Temporal Balanced | 28.901 |
 
 ### 2x Temporal Super-Resolution Image Quality Comparison
 
-<p align="center"><strong>MagicSR (left) vs MetalFX (right)</strong></p>
+<p align="center"><strong>MagicSR (left) vs FSR3 (right)</strong></p>
 
-<img src="README.assets/MagicSR_LEFT_vs_MetalFX_RIGHT.gif" width="880" alt="MagicSR (left) vs MetalFX (right)">
+<img src="README.assets/MagicSR_LEFT_vs_FSR3_RIGHT.gif" width="880" alt="MagicSR (left) vs FSR3 (right)">
 
 <p align="center"><strong>MagicSR (left) vs Official SGSR2.0 (right)</strong></p>
 
@@ -99,6 +99,32 @@ In-game clip with on-screen HUD comparing the original stream against MagicSR.
 </a>
 
 [**▶ Watch full video (MP4)**](https://github.com/MagicCode-ai/SuperResolution/raw/main/README.assets/game_16-26s_vs_magicsr_clip_hud.mp4)
+
+### Magic Frame Generation
+
+#### 2x Frame Generation Processing Speed Test
+
+##### Android vulkan Magic frame generation speed (resolution: 1920x1080)
+
+Metric: processing time (ms).
+
+| Method | Time (ms) |
+| --- | ---: |
+| 骁龙 8 Gen 2 | 8.69 |
+| 骁龙 888 | 19.82 |
+
+##### Discrete RTX 4080 frame generation speed (resolution: 2560x1440)
+
+Metric: processing time (ms).
+
+| Method | Time (ms) |
+| --- | ---: |
+| Magic FG Ultraspeed | 1.04 |
+| FSR3 | 2.3 |
+
+#### 2x Frame Generation Effect
+
+[**▶ Watch comparison video (MP4)**](README.assets/compare_100_vs_fg_slow-cut.mp4)
 
 ### Productization Support
 
